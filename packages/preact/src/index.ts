@@ -7,6 +7,10 @@ import {
 	effect,
 	action,
 	createModel,
+	asyncComputed,
+	awaited,
+	type AsyncComputedFn,
+	type AsyncComputedSignal,
 	type Model,
 	type ModelConstructor,
 	type ModelFactory,
@@ -32,6 +36,10 @@ export {
 	batch,
 	effect,
 	action,
+	asyncComputed,
+	awaited,
+	type AsyncComputedFn,
+	type AsyncComputedSignal,
 	type Model,
 	type ModelConstructor,
 	type ModelFactory,
@@ -463,6 +471,71 @@ export function useComputed<T>(compute: () => T, options?: SignalOptions<T>) {
 	$compute.current = compute;
 	(currentComponent as AugmentedComponent)._updateFlags |= HAS_COMPUTEDS;
 	return useMemo(() => computed<T>(() => $compute.current(), options), []);
+}
+
+export interface UseAsyncComputedOptions<T> extends SignalOptions<
+	T | undefined
+> {
+	/**
+	 * While the signal has never settled, throw its in-flight promise during
+	 * render so an enclosing `<Suspense>` boundary shows its fallback.
+	 * Defaults to true.
+	 *
+	 * Only applies when an `asyncComputed` created outside the component is
+	 * passed in. Hook state does not survive a suspense fallback, so a
+	 * hook-created instance would be recreated on every retry and suspend
+	 * forever; those instances never suspend.
+	 */
+	suspend?: boolean;
+	/**
+	 * Rethrow the signal's `error` during render so an enclosing error
+	 * boundary catches it. Defaults to true.
+	 */
+	throwOnError?: boolean;
+}
+
+export function useAsyncComputed<T>(
+	compute: AsyncComputedFn<T> | AsyncComputedSignal<T>,
+	options?: UseAsyncComputedOptions<T>
+): AsyncComputedSignal<T> {
+	const $compute = useRef(compute);
+	$compute.current = compute;
+	const s = useMemo(() => {
+		return typeof compute === "function"
+			? asyncComputed<T>(
+					() => ($compute.current as AsyncComputedFn<T>)(),
+					options
+				)
+			: compute;
+	}, []);
+	const external = s === compute;
+	// Only dispose instances the hook created itself.
+	useEffect(() => (external ? undefined : s.dispose), [s]);
+
+	if (options?.throwOnError !== false && s.error.value !== undefined) {
+		throw s.error.value;
+	}
+	if (
+		external &&
+		options?.suspend !== false &&
+		s.pending.value &&
+		s.peek() === undefined
+	) {
+		throw settlementOf(s);
+	}
+	return s;
+}
+
+/** A promise that resolves when `s` next stops being pending. */
+function settlementOf(s: AsyncComputedSignal<unknown>): Promise<void> {
+	return new Promise<void>(resolve => {
+		effect(function (this: { dispose(): void }) {
+			if (!s.pending.value) {
+				resolve();
+				this.dispose();
+			}
+		});
+	});
 }
 
 function safeRaf(callback: () => void) {

@@ -1124,6 +1124,187 @@ function createModel<TModel, TFactoryArgs extends any[] = []>(
 
 //#endregion createModel
 
+//#region AsyncComputed (experimental)
+
+/**
+ * EXPERIMENTAL — prototype of an async-aware computed.
+ *
+ * Dependency tracking relies on the module-global `evalContext`, which only
+ * exists during a synchronous evaluation pass — an `async` function would
+ * stop registering dependencies at its first `await`. Generators avoid this:
+ * the eval context is re-entered before each segment is resumed, so reads
+ * after a `yield` still register. Yielded promises are awaited; resolutions
+ * are passed back into the generator and rejections thrown into it, so
+ * try/catch works around a yield.
+ */
+export type AsyncComputedFn<T> = () => Generator<unknown, T, any>;
+
+export interface AsyncComputedSignal<T> extends ReadonlySignal<T | undefined> {
+	/**
+	 * True while a run is suspended on a yielded promise. `.value` keeps the
+	 * last settled value in the meantime. Runs that complete without
+	 * suspending never flip this to true.
+	 */
+	pending: ReadonlySignal<boolean>;
+	/** The error that ended the last run, or undefined if it settled successfully. */
+	error: ReadonlySignal<unknown>;
+	dispose(): void;
+}
+
+/**
+ * Typed `await` for use inside `asyncComputed` generators:
+ *
+ * ```ts
+ * const res = yield* awaited(fetch(url)); // res: Response
+ * ```
+ *
+ * A bare `yield promise` works too, but its result is typed `any`.
+ *
+ * Hand-rolled instead of `function*` so the browser builds don't pull in
+ * Babel's regenerator runtime: it yields `value` once and returns whatever
+ * the driving `yield*` feeds back in.
+ */
+export function awaited<T>(
+	value: PromiseLike<T> | T
+): Generator<unknown, T, unknown> {
+	let done = false;
+	const it = {
+		[Symbol.iterator]: () => it,
+		next(input?: unknown) {
+			const result = { done, value: done ? (input as T) : value };
+			done = true;
+			return result;
+		},
+		return: (input?: T) => ({ done: true, value: input as T }),
+		throw(err?: unknown): never {
+			throw err;
+		},
+	};
+	return it as unknown as Generator<unknown, T, unknown>;
+}
+
+/**
+ * Create a computed whose evaluation may suspend on promises while still
+ * tracking every signal read as a dependency, including reads made after a
+ * suspension point.
+ *
+ * When any dependency changes — even while a run is suspended — the current
+ * run is aborted (its `finally` blocks execute) and a fresh run starts.
+ * Resolutions belonging to superseded runs are ignored, so out-of-order
+ * settles can't clobber newer results.
+ */
+export function asyncComputed<T>(
+	fn: AsyncComputedFn<T>,
+	options?: SignalOptions<T | undefined>
+): AsyncComputedSignal<T> {
+	const out = new Signal<T | undefined>(undefined, options);
+	const pending = new Signal(false);
+	const error = new Signal<unknown>(undefined);
+	const runner = new Effect(function () {}, options);
+
+	let runId = 0;
+	let iterator: Generator<unknown, T, any> | undefined;
+	// The prepareSources/cleanupSources bracket spans the whole run — all
+	// segments — so dependencies accumulate rather than resetting per segment.
+	let tracking = false;
+
+	function closeTracking() {
+		if (tracking) {
+			tracking = false;
+			cleanupSources(runner);
+		}
+	}
+
+	function abortRun() {
+		const it = iterator;
+		iterator = undefined;
+		closeTracking();
+		if (it !== undefined) {
+			// Run the generator's finally blocks outside any tracking context.
+			batch(() => untracked(() => it.return(undefined as unknown as T)));
+		}
+	}
+
+	function settle(settledError: unknown, value?: T) {
+		iterator = undefined;
+		closeTracking();
+		batch(() => {
+			error.value = settledError;
+			if (settledError === undefined) {
+				out.value = value;
+			}
+			pending.value = false;
+		});
+	}
+
+	function resume(id: number, input: unknown, isThrow?: boolean): void {
+		if (id !== runId || iterator === undefined) {
+			return;
+		}
+		const it = iterator;
+		let result: IteratorResult<unknown, T> | undefined;
+		let thrown: unknown;
+
+		/*@__INLINE__**/ startBatch();
+		const prevContext = evalContext;
+		evalContext = runner;
+		runner._flags |= RUNNING;
+		try {
+			result = isThrow ? it.throw(input) : it.next(input);
+		} catch (err) {
+			thrown = err;
+		} finally {
+			evalContext = prevContext;
+			runner._flags &= ~RUNNING;
+			endBatch();
+		}
+
+		// The segment may have written one of the runner's own dependencies, in
+		// which case endBatch() already restarted the run and this one is stale.
+		if (id !== runId) return;
+
+		if (result === undefined) return settle(thrown);
+		if (result.done) return settle(undefined, result.value);
+
+		// Suspend. Non-thenable yields resolve on the microtask queue so that a
+		// tight `while (true) yield` generator can't starve the event loop.
+		pending.value = true;
+		Promise.resolve(result.value).then(
+			value => resume(id, value),
+			err => resume(id, err, true)
+		);
+	}
+
+	function startRun() {
+		const id = ++runId;
+		abortRun();
+		prepareSources(runner);
+		tracking = true;
+		iterator = fn();
+		resume(id, undefined);
+	}
+
+	runner._callback = startRun;
+	runner._dispose = function () {
+		runId++;
+		abortRun();
+		pending.value = false;
+		Effect.prototype._dispose.call(runner);
+	};
+	startRun();
+
+	const facade = out as unknown as AsyncComputedSignal<T> & {
+		pending: Signal<boolean>;
+		error: Signal<unknown>;
+	};
+	facade.pending = pending;
+	facade.error = error;
+	facade.dispose = runner.dispose.bind(runner);
+	return facade;
+}
+
+//#endregion AsyncComputed
+
 export {
 	computed,
 	effect,

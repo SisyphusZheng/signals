@@ -12,6 +12,10 @@ import {
 	batch,
 	effect,
 	action,
+	asyncComputed,
+	awaited,
+	type AsyncComputedFn,
+	type AsyncComputedSignal,
 	type Model,
 	type ModelConstructor,
 	type ModelFactory,
@@ -26,6 +30,8 @@ import {
 	useComputed,
 	useSignalEffect,
 	useModel,
+	useAsyncComputed,
+	type UseAsyncComputedOptions,
 } from "@preact/signals-react/runtime";
 
 export {
@@ -34,6 +40,10 @@ export {
 	batch,
 	effect,
 	action,
+	asyncComputed,
+	awaited,
+	type AsyncComputedFn,
+	type AsyncComputedSignal,
 	type Model,
 	type ModelConstructor,
 	type ModelFactory,
@@ -44,6 +54,8 @@ export {
 	useComputed,
 	useSignalEffect,
 	useModel,
+	useAsyncComputed,
+	type UseAsyncComputedOptions,
 	untracked,
 };
 
