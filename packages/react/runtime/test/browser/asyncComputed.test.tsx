@@ -1,9 +1,9 @@
 // @ts-expect-error
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-import { createElement, Component, Suspense } from "react";
+import { createElement, Component } from "react";
 import type { ReactNode } from "react";
-import { signal, asyncComputed } from "@preact/signals-core";
+import { signal } from "@preact/signals-core";
 import { useAsyncComputed, useSignals } from "@preact/signals-react/runtime";
 import {
 	Root,
@@ -61,92 +61,13 @@ describe("useAsyncComputed", () => {
 		checkHangingAct();
 	});
 
-	it("suspends until the first value settles", async () => {
-		const d = defer<string>();
-		const s = asyncComputed(function* () {
-			return (yield d.promise) as string;
-		});
-		function App() {
-			useSignals();
-			const value = useAsyncComputed(s);
-			return <p>{value.value}</p>;
-		}
-
-		await render(
-			<Suspense fallback={<span>loading</span>}>
-				<App />
-			</Suspense>
-		);
-		expect(scratch.textContent).to.equal("loading");
-
-		await act(async () => {
-			d.resolve("hello");
-			await sleep(1);
-		});
-		expect(scratch.textContent).to.equal("hello");
-	});
-
-	it("never suspends hook-created instances", async () => {
+	it("renders undefined until the first value settles", async () => {
 		const d = defer<string>();
 		function App() {
 			useSignals();
-			const s = useAsyncComputed<string>(function* () {
+			const s = useAsyncComputed(function* () {
 				return (yield d.promise) as string;
 			});
-			return <p>{s.value ?? "none"}</p>;
-		}
-
-		await render(
-			<Suspense fallback={<span>loading</span>}>
-				<App />
-			</Suspense>
-		);
-		expect(scratch.textContent).to.equal("none");
-
-		await act(async () => {
-			d.resolve("hello");
-			await sleep(1);
-		});
-		expect(scratch.textContent).to.equal("hello");
-	});
-
-	it("throws errors to an error boundary", async () => {
-		const d = defer<string>();
-		const s = asyncComputed(function* () {
-			return (yield d.promise) as string;
-		});
-		function App() {
-			useSignals();
-			const value = useAsyncComputed(s);
-			return <p>{value.value}</p>;
-		}
-
-		await render(
-			<Boundary>
-				<Suspense fallback={<span>loading</span>}>
-					<App />
-				</Suspense>
-			</Boundary>
-		);
-		expect(scratch.textContent).to.equal("loading");
-
-		await act(async () => {
-			d.reject(new Error("boom"));
-			await sleep(1);
-		});
-		expect(scratch.textContent).to.equal("caught:boom");
-	});
-
-	it("does not suspend when suspend is turned off", async () => {
-		const d = defer<string>();
-		function App() {
-			useSignals();
-			const s = useAsyncComputed<string>(
-				function* () {
-					return (yield d.promise) as string;
-				},
-				{ suspend: false }
-			);
 			return <p>{s.value ?? "none"}</p>;
 		}
 
@@ -160,15 +81,39 @@ describe("useAsyncComputed", () => {
 		expect(scratch.textContent).to.equal("hello");
 	});
 
+	it("throws errors to an error boundary", async () => {
+		const d = defer<string>();
+		function App() {
+			useSignals();
+			const s = useAsyncComputed(function* () {
+				return (yield d.promise) as string;
+			});
+			return <p>{s.value ?? "none"}</p>;
+		}
+
+		await render(
+			<Boundary>
+				<App />
+			</Boundary>
+		);
+		expect(scratch.textContent).to.equal("none");
+
+		await act(async () => {
+			d.reject(new Error("boom"));
+			await sleep(1);
+		});
+		expect(scratch.textContent).to.equal("caught:boom");
+	});
+
 	it("exposes errors on the signal when throwOnError is turned off", async () => {
 		const d = defer<string>();
 		function App() {
 			useSignals();
-			const s = useAsyncComputed<string>(
+			const s = useAsyncComputed(
 				function* () {
 					return (yield d.promise) as string;
 				},
-				{ suspend: false, throwOnError: false }
+				{ throwOnError: false }
 			);
 			return (
 				<p>
@@ -187,26 +132,21 @@ describe("useAsyncComputed", () => {
 		expect(scratch.textContent).to.equal("err:boom");
 	});
 
-	it("shows the previous value instead of re-suspending on revalidation", async () => {
+	it("shows the previous value while a new run is in flight", async () => {
 		const id = signal(1);
 		let d = defer();
-		const s = asyncComputed(function* () {
-			const current = id.value;
-			yield d.promise;
-			return `story ${current}`;
-		});
 		function App() {
 			useSignals();
-			const value = useAsyncComputed(s);
-			return <p>{value.value}</p>;
+			const s = useAsyncComputed(function* () {
+				const current = id.value;
+				yield d.promise;
+				return `story ${current}`;
+			});
+			return <p>{s.value ?? "none"}</p>;
 		}
 
-		await render(
-			<Suspense fallback={<span>loading</span>}>
-				<App />
-			</Suspense>
-		);
-		expect(scratch.textContent).to.equal("loading");
+		await render(<App />);
+		expect(scratch.textContent).to.equal("none");
 
 		await act(async () => {
 			d.resolve();
@@ -226,5 +166,34 @@ describe("useAsyncComputed", () => {
 			await sleep(1);
 		});
 		expect(scratch.textContent).to.equal("story 2");
+	});
+
+	it("disposes the instance on unmount", async () => {
+		const dep = signal(1);
+		let runs = 0;
+		let d = defer();
+		function App() {
+			useSignals();
+			const s = useAsyncComputed(function* () {
+				runs++;
+				const current = dep.value;
+				yield d.promise;
+				return current;
+			});
+			return <p>{s.value ?? "none"}</p>;
+		}
+
+		await render(<App />);
+		await act(async () => {
+			d.resolve();
+			await sleep(1);
+		});
+		expect(runs).to.equal(1);
+
+		await act(() => root.unmount());
+		d = defer();
+		dep.value = 2;
+		await sleep(1);
+		expect(runs).to.equal(1);
 	});
 });

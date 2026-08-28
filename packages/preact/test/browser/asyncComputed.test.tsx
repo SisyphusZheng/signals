@@ -1,8 +1,6 @@
-import { signal, asyncComputed, useAsyncComputed } from "@preact/signals";
+import { signal, useAsyncComputed } from "@preact/signals";
 import { createElement, render, Component } from "preact";
-import type { ComponentChildren, FunctionComponent } from "preact";
-// @ts-ignore untyped shim — see the comment inside it
-import { Suspense as CompatSuspense } from "./suspense-compat.js";
+import type { ComponentChildren } from "preact";
 import { act } from "preact/test-utils";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
@@ -17,11 +15,6 @@ function defer<T = void>() {
 	});
 	return { promise, resolve, reject };
 }
-
-const Suspense = CompatSuspense as FunctionComponent<{
-	fallback?: ComponentChildren;
-	children?: ComponentChildren;
-}>;
 
 class Boundary extends Component<
 	{ children: ComponentChildren },
@@ -51,122 +44,13 @@ describe("useAsyncComputed", () => {
 		render(null, scratch);
 	});
 
-	it("suspends until an external instance first settles", async () => {
-		const d = defer<string>();
-		const s = asyncComputed(function* () {
-			return (yield d.promise) as string;
-		});
-		function App() {
-			const value = useAsyncComputed(s);
-			return <p>{value.value}</p>;
-		}
-
-		act(() => {
-			render(
-				<Suspense fallback={<span>loading</span>}>
-					<App />
-				</Suspense>,
-				scratch
-			);
-		});
-		expect(scratch.textContent).to.equal("loading");
-
-		await act(async () => {
-			d.resolve("hello");
-			await sleep(1);
-		});
-		expect(scratch.textContent).to.equal("hello");
-	});
-
-	it("throws errors from an external instance to an error boundary", async () => {
-		const d = defer<string>();
-		const s = asyncComputed(function* () {
-			return (yield d.promise) as string;
-		});
-		function App() {
-			const value = useAsyncComputed(s);
-			return <p>{value.value}</p>;
-		}
-
-		act(() => {
-			render(
-				<Boundary>
-					<Suspense fallback={<span>loading</span>}>
-						<App />
-					</Suspense>
-				</Boundary>,
-				scratch
-			);
-		});
-		expect(scratch.textContent).to.equal("loading");
-
-		await act(async () => {
-			d.reject(new Error("boom"));
-			await sleep(1);
-		});
-		expect(scratch.textContent).to.equal("caught:boom");
-	});
-
-	it("never suspends hook-created instances", async () => {
+	it("renders undefined until the first value settles", async () => {
 		const d = defer<string>();
 		function App() {
 			const s = useAsyncComputed(function* () {
 				return (yield d.promise) as string;
 			});
 			return <p>{s.value ?? "none"}</p>;
-		}
-
-		act(() => {
-			render(
-				<Suspense fallback={<span>loading</span>}>
-					<App />
-				</Suspense>,
-				scratch
-			);
-		});
-		expect(scratch.textContent).to.equal("none");
-
-		await act(async () => {
-			d.resolve("hello");
-			await sleep(1);
-		});
-		expect(scratch.textContent).to.equal("hello");
-	});
-
-	it("throws errors from hook-created instances to an error boundary", async () => {
-		const d = defer<string>();
-		function App() {
-			const s = useAsyncComputed(function* () {
-				return (yield d.promise) as string;
-			});
-			return <p>{s.value ?? "none"}</p>;
-		}
-
-		act(() => {
-			render(
-				<Boundary>
-					<App />
-				</Boundary>,
-				scratch
-			);
-		});
-		expect(scratch.textContent).to.equal("none");
-
-		await act(async () => {
-			d.reject(new Error("boom"));
-			await sleep(1);
-		});
-		expect(scratch.textContent).to.equal("caught:boom");
-	});
-
-	it("does not suspend when suspend is turned off", async () => {
-		const d = defer<string>();
-		const s = asyncComputed(function* () {
-			return (yield d.promise) as string;
-		});
-		function App() {
-			const value = useAsyncComputed(s, { suspend: false });
-			return <p>{value.value ?? "none"}</p>;
 		}
 
 		render(<App />, scratch);
@@ -177,6 +61,30 @@ describe("useAsyncComputed", () => {
 			await sleep(1);
 		});
 		expect(scratch.textContent).to.equal("hello");
+	});
+
+	it("throws errors to an error boundary", async () => {
+		const d = defer<string>();
+		function App() {
+			const s = useAsyncComputed(function* () {
+				return (yield d.promise) as string;
+			});
+			return <p>{s.value ?? "none"}</p>;
+		}
+
+		render(
+			<Boundary>
+				<App />
+			</Boundary>,
+			scratch
+		);
+		expect(scratch.textContent).to.equal("none");
+
+		await act(async () => {
+			d.reject(new Error("boom"));
+			await sleep(1);
+		});
+		expect(scratch.textContent).to.equal("caught:boom");
 	});
 
 	it("exposes errors on the signal when throwOnError is turned off", async () => {
@@ -205,28 +113,20 @@ describe("useAsyncComputed", () => {
 		expect(scratch.textContent).to.equal("err:boom");
 	});
 
-	it("shows the previous value instead of re-suspending on revalidation", async () => {
+	it("shows the previous value while a new run is in flight", async () => {
 		const id = signal(1);
 		let d = defer();
-		const s = asyncComputed(function* () {
-			const current = id.value;
-			yield d.promise;
-			return `story ${current}`;
-		});
 		function App() {
-			const value = useAsyncComputed(s);
-			return <p>{value.value}</p>;
+			const s = useAsyncComputed(function* () {
+				const current = id.value;
+				yield d.promise;
+				return `story ${current}`;
+			});
+			return <p>{s.value ?? "none"}</p>;
 		}
 
-		act(() => {
-			render(
-				<Suspense fallback={<span>loading</span>}>
-					<App />
-				</Suspense>,
-				scratch
-			);
-		});
-		expect(scratch.textContent).to.equal("loading");
+		render(<App />, scratch);
+		expect(scratch.textContent).to.equal("none");
 
 		await act(async () => {
 			d.resolve();
@@ -248,34 +148,31 @@ describe("useAsyncComputed", () => {
 		expect(scratch.textContent).to.equal("story 2");
 	});
 
-	it("does not dispose external instances on unmount", async () => {
-		const d = defer<string>();
-		const s = asyncComputed(function* () {
-			return (yield d.promise) as string;
-		});
+	it("disposes the instance on unmount", async () => {
+		const dep = signal(1);
+		let runs = 0;
+		let d = defer();
 		function App() {
-			const value = useAsyncComputed(s);
-			return <p>{value.value}</p>;
+			const s = useAsyncComputed(function* () {
+				runs++;
+				const current = dep.value;
+				yield d.promise;
+				return current;
+			});
+			return <p>{s.value ?? "none"}</p>;
 		}
 
-		act(() => {
-			render(
-				<Suspense fallback={<span>loading</span>}>
-					<App />
-				</Suspense>,
-				scratch
-			);
-		});
-		expect(scratch.textContent).to.equal("loading");
-
+		render(<App />, scratch);
 		await act(async () => {
-			d.resolve("shared");
+			d.resolve();
 			await sleep(1);
 		});
-		expect(scratch.textContent).to.equal("shared");
+		expect(runs).to.equal(1);
 
 		render(null, scratch);
-		expect(s.value).to.equal("shared");
-		expect(s.pending.value).to.equal(false);
+		d = defer();
+		dep.value = 2;
+		await sleep(1);
+		expect(runs).to.equal(1);
 	});
 });
