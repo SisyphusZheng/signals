@@ -1,8 +1,15 @@
 import { signal, useAsyncComputed } from "@preact/signals";
 import { createElement, render, Component } from "preact";
-import type { ComponentChildren } from "preact";
+import type { ComponentChildren, FunctionComponent } from "preact";
+// @ts-ignore untyped shim — see the comment inside it
+import { Suspense as CompatSuspense } from "./suspense-compat.js";
 import { act } from "preact/test-utils";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
+const Suspense = CompatSuspense as FunctionComponent<{
+	fallback?: ComponentChildren;
+	children?: ComponentChildren;
+}>;
 
 const sleep = (ms?: number) => new Promise(r => setTimeout(r, ms));
 
@@ -146,6 +153,70 @@ describe("useAsyncComputed", () => {
 			await sleep(1);
 		});
 		expect(scratch.textContent).to.equal("story 2");
+	});
+
+	it("shows the Suspense fallback while unsettled when suspend is enabled", async () => {
+		const d = defer<string>();
+		function App() {
+			const s = useAsyncComputed(
+				function* () {
+					return (yield d.promise) as string;
+				},
+				{ suspend: true }
+			);
+			return <p>{s.value}</p>;
+		}
+
+		act(() => {
+			render(
+				<Suspense fallback={<span>loading</span>}>
+					<App />
+				</Suspense>,
+				scratch
+			);
+		});
+		expect(scratch.textContent).to.equal("loading");
+	});
+
+	it("suspends only before the first settlement", async () => {
+		const dep = signal(1);
+		const d = defer();
+		function App() {
+			const s = useAsyncComputed(
+				function* () {
+					const id = dep.value;
+					if (id === 1) return "sync 1";
+					yield d.promise;
+					return `async ${id}`;
+				},
+				{ suspend: true }
+			);
+			return <p>{s.value}</p>;
+		}
+
+		act(() => {
+			render(
+				<Suspense fallback={<span>loading</span>}>
+					<App />
+				</Suspense>,
+				scratch
+			);
+		});
+		// The first run settled synchronously, so no fallback was shown.
+		expect(scratch.textContent).to.equal("sync 1");
+
+		await act(async () => {
+			dep.value = 2;
+			await sleep(1);
+		});
+		// Revalidation holds the previous value instead of re-suspending.
+		expect(scratch.textContent).to.equal("sync 1");
+
+		await act(async () => {
+			d.resolve();
+			await sleep(1);
+		});
+		expect(scratch.textContent).to.equal("async 2");
 	});
 
 	it("disposes the instance on unmount", async () => {

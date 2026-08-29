@@ -443,13 +443,20 @@ export interface UseAsyncComputedOptions<T> extends SignalOptions<
 	 * boundary catches it. Defaults to true.
 	 */
 	throwOnError?: boolean;
+	/**
+	 * Throw the signal's settlement promise during render while it has never
+	 * settled, so an enclosing `<Suspense>` boundary shows its fallback.
+	 * Defaults to false.
+	 *
+	 * Beware: hook state does not survive suspending during the initial
+	 * mount (React 19's `use()` behaves the same), so the retry re-creates
+	 * the hook-owned instance and restarts its run. The boundary only
+	 * resolves once a run settles synchronously; a first run that always
+	 * suspends keeps the fallback up and refetches on every retry.
+	 */
+	suspend?: boolean;
 }
 
-/**
- * The hook never suspends: hook state does not survive a suspense fallback,
- * so a hook-owned instance would be recreated on every retry and remain
- * pending forever. `.value` is undefined until the first run settles.
- */
 export function useAsyncComputed<T>(
 	compute: AsyncComputedFn<T>,
 	options?: UseAsyncComputedOptions<T>
@@ -465,7 +472,34 @@ export function useAsyncComputed<T>(
 	if (options?.throwOnError !== false && s.error.value !== undefined) {
 		throw s.error.value;
 	}
+	if (options?.suspend && s.pending.value && s.peek() === undefined) {
+		throw settlementOf(s);
+	}
 	return s;
+}
+
+const settlements = new WeakMap<AsyncComputedSignal<unknown>, Promise<void>>();
+
+/**
+ * A promise that resolves when `s` next stops being pending, cached per
+ * instance so repeated renders of a suspended component rethrow the same
+ * promise object.
+ */
+function settlementOf(s: AsyncComputedSignal<unknown>): Promise<void> {
+	let p = settlements.get(s);
+	if (p === undefined) {
+		p = new Promise<void>(resolve => {
+			effect(function (this: { dispose(): void }) {
+				if (!s.pending.value) {
+					settlements.delete(s);
+					resolve();
+					this.dispose();
+				}
+			});
+		});
+		settlements.set(s, p);
+	}
+	return p;
 }
 
 export function useSignalEffect(

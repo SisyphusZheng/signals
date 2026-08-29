@@ -1,7 +1,7 @@
 // @ts-expect-error
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-import { createElement, Component } from "react";
+import { createElement, Component, Suspense } from "react";
 import type { ReactNode } from "react";
 import { signal } from "@preact/signals-core";
 import { useAsyncComputed, useSignals } from "@preact/signals-react/runtime";
@@ -166,6 +166,66 @@ describe("useAsyncComputed", () => {
 			await sleep(1);
 		});
 		expect(scratch.textContent).to.equal("story 2");
+	});
+
+	it("shows the Suspense fallback while unsettled when suspend is enabled", async () => {
+		const d = defer<string>();
+		function App() {
+			useSignals();
+			const s = useAsyncComputed(
+				function* () {
+					return (yield d.promise) as string;
+				},
+				{ suspend: true }
+			);
+			return <p>{s.value}</p>;
+		}
+
+		await render(
+			<Suspense fallback={<span>loading</span>}>
+				<App />
+			</Suspense>
+		);
+		expect(scratch.textContent).to.equal("loading");
+	});
+
+	it("suspends only before the first settlement", async () => {
+		const dep = signal(1);
+		const d = defer();
+		function App() {
+			useSignals();
+			const s = useAsyncComputed(
+				function* () {
+					const id = dep.value;
+					if (id === 1) return "sync 1";
+					yield d.promise;
+					return `async ${id}`;
+				},
+				{ suspend: true }
+			);
+			return <p>{s.value}</p>;
+		}
+
+		await render(
+			<Suspense fallback={<span>loading</span>}>
+				<App />
+			</Suspense>
+		);
+		// The first run settled synchronously, so no fallback was shown.
+		expect(scratch.textContent).to.equal("sync 1");
+
+		await act(async () => {
+			dep.value = 2;
+			await sleep(1);
+		});
+		// Revalidation holds the previous value instead of re-suspending.
+		expect(scratch.textContent).to.equal("sync 1");
+
+		await act(async () => {
+			d.resolve();
+			await sleep(1);
+		});
+		expect(scratch.textContent).to.equal("async 2");
 	});
 
 	it("disposes the instance on unmount", async () => {
