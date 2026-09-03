@@ -1,0 +1,2163 @@
+import { createElement } from "preact";
+import { render } from "preact";
+import { act } from "preact/test-utils";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+	DevToolsPanel,
+	mount,
+	initDevTools,
+	destroyDevTools,
+	getContext,
+	MAX_TIMELINE_BATCHES,
+} from "../../src/index";
+import { Button } from "../../src/components/Button";
+import { EmptyState } from "../../src/components/EmptyState";
+import { Header } from "../../src/components/Header";
+import { PerformanceInsights } from "../../src/components/PerformanceInsights";
+import { SettingsPanel } from "../../src/components/SettingsPanel";
+import { StatusIndicator } from "../../src/components/StatusIndicator";
+import { UpdateItem } from "../../src/components/UpdateItem";
+import { UpdatesContainer } from "../../src/components/UpdatesContainer";
+import { Timeline, MAX_VISIBLE_BATCHES } from "../../src/components/Timeline";
+import {
+	GraphVisualization,
+	calculateFitTransform,
+	calculateGraphBounds,
+	filterGraphToNeighborhood,
+} from "../../src/components/Graph";
+import {
+	derivePerformanceInsights,
+	MAX_RECENT_OCCURRENCES,
+} from "../../src/models/PerformanceInsightsModel";
+import type { PerformanceObservation } from "../../src/models/UpdatesModel";
+import type {
+	DevToolsAdapter,
+	Settings,
+	ConnectionStatus,
+	DependencyInfo,
+} from "@preact/signals-devtools-adapter";
+
+/**
+ * Creates a mock DevToolsAdapter for testing
+ */
+function createMockAdapter(
+	overrides: Partial<DevToolsAdapter> = {}
+): DevToolsAdapter {
+	const listeners: Map<string, Set<Function>> = new Map();
+
+	return {
+		connect: vi.fn().mockResolvedValue(undefined),
+		disconnect: vi.fn(),
+		sendConfig: vi.fn(),
+		requestState: vi.fn(),
+		on: vi.fn((event: string, listener: Function) => {
+			if (!listeners.has(event)) {
+				listeners.set(event, new Set());
+			}
+			listeners.get(event)!.add(listener);
+			return () => {
+				listeners.get(event)?.delete(listener);
+			};
+		}),
+		getConnectionStatus: vi.fn().mockReturnValue({
+			status: "connected",
+			message: "Connected",
+		} as ConnectionStatus),
+		isSignalsAvailable: vi.fn().mockReturnValue(true),
+		// Helper to emit events in tests
+		_emit: (event: string, data: any) => {
+			listeners.get(event)?.forEach(listener => listener(data));
+		},
+		...overrides,
+	} as DevToolsAdapter & { _emit: (event: string, data: any) => void };
+}
+
+describe("@preact/signals-devtools-ui", () => {
+	let scratch: HTMLDivElement;
+	let mockAdapter: DevToolsAdapter & {
+		_emit: (event: string, data: any) => void;
+	};
+
+	beforeEach(() => {
+		scratch = document.createElement("div");
+		document.body.appendChild(scratch);
+		mockAdapter = createMockAdapter();
+	});
+
+	afterEach(() => {
+		render(null, scratch);
+		scratch.remove();
+		try {
+			destroyDevTools();
+		} catch {
+			// Context may not be initialized in all tests
+		}
+	});
+
+	describe("Button", () => {
+		it("should render with children", () => {
+			const onClick = vi.fn();
+			// @ts-expect-error
+			render(<Button onClick={onClick}>Click me</Button>, scratch);
+
+			const button = scratch.querySelector("button");
+			expect(button).to.not.be.null;
+			expect(button!.textContent).to.equal("Click me");
+		});
+
+		it("should call onClick when clicked", () => {
+			const onClick = vi.fn();
+			render(<Button onClick={onClick}>Click me</Button>, scratch);
+
+			const button = scratch.querySelector("button")!;
+			button.click();
+
+			expect(onClick).toHaveBeenCalledOnce();
+		});
+
+		it("should apply primary variant class", () => {
+			const onClick = vi.fn();
+			render(
+				<Button onClick={onClick} variant="primary">
+					Primary
+				</Button>,
+				scratch
+			);
+
+			const button = scratch.querySelector("button")!;
+			expect(button.classList.contains("btn-primary")).to.be.true;
+		});
+
+		it("should apply secondary variant class by default", () => {
+			const onClick = vi.fn();
+			render(<Button onClick={onClick}>Secondary</Button>, scratch);
+
+			const button = scratch.querySelector("button")!;
+			expect(button.classList.contains("btn-secondary")).to.be.true;
+		});
+
+		it("should apply active class when active", () => {
+			const onClick = vi.fn();
+			render(
+				<Button onClick={onClick} active>
+					Active
+				</Button>,
+				scratch
+			);
+
+			const button = scratch.querySelector("button")!;
+			expect(button.classList.contains("active")).to.be.true;
+		});
+
+		it("should be disabled when disabled prop is true", () => {
+			const onClick = vi.fn();
+			render(
+				<Button onClick={onClick} disabled>
+					Disabled
+				</Button>,
+				scratch
+			);
+
+			const button = scratch.querySelector("button")!;
+			expect(button.disabled).to.be.true;
+		});
+
+		it("should apply custom className", () => {
+			const onClick = vi.fn();
+			render(
+				<Button onClick={onClick} className="custom-class">
+					Custom
+				</Button>,
+				scratch
+			);
+
+			const button = scratch.querySelector("button")!;
+			expect(button.classList.contains("custom-class")).to.be.true;
+		});
+	});
+
+	describe("StatusIndicator", () => {
+		it("should render status message", () => {
+			render(
+				<StatusIndicator status="connected" message="Connected to signals" />,
+				scratch
+			);
+
+			const statusText = scratch.querySelector(".status-text");
+			expect(statusText).to.not.be.null;
+			expect(statusText!.textContent).to.equal("Connected to signals");
+		});
+
+		it("should apply correct status class", () => {
+			render(
+				<StatusIndicator status="connected" message="Connected" />,
+				scratch
+			);
+
+			const container = scratch.querySelector(".connection-status");
+			expect(container!.classList.contains("connected")).to.be.true;
+		});
+
+		it("should show indicator by default", () => {
+			render(
+				<StatusIndicator status="connecting" message="Connecting..." />,
+				scratch
+			);
+
+			const indicator = scratch.querySelector(".status-indicator");
+			expect(indicator).to.not.be.null;
+		});
+
+		it("should hide indicator when showIndicator is false", () => {
+			render(
+				<StatusIndicator
+					status="connected"
+					message="Connected"
+					showIndicator={false}
+				/>,
+				scratch
+			);
+
+			const indicator = scratch.querySelector(".status-indicator");
+			expect(indicator).to.be.null;
+		});
+
+		it("should apply disconnected status class", () => {
+			render(
+				<StatusIndicator status="disconnected" message="Disconnected" />,
+				scratch
+			);
+
+			const container = scratch.querySelector(".connection-status");
+			expect(container!.classList.contains("disconnected")).to.be.true;
+		});
+
+		it("should apply warning status class", () => {
+			render(<StatusIndicator status="warning" message="Warning" />, scratch);
+
+			const container = scratch.querySelector(".connection-status");
+			expect(container!.classList.contains("warning")).to.be.true;
+		});
+
+		it("should apply custom className", () => {
+			render(
+				<StatusIndicator
+					status="connected"
+					message="Connected"
+					className="my-custom-status"
+				/>,
+				scratch
+			);
+
+			const container = scratch.querySelector(".connection-status");
+			expect(container!.classList.contains("my-custom-status")).to.be.true;
+		});
+	});
+
+	describe("EmptyState", () => {
+		it("should render default title and description", () => {
+			const onRefresh = vi.fn();
+			render(<EmptyState onRefresh={onRefresh} />, scratch);
+
+			const title = scratch.querySelector("h2");
+			const description = scratch.querySelector("p");
+
+			expect(title!.textContent).to.equal("No Signals Detected");
+			expect(description!.textContent).to.contain("@preact/signals-debug");
+		});
+
+		it("should render custom title and description", () => {
+			const onRefresh = vi.fn();
+			render(
+				<EmptyState
+					onRefresh={onRefresh}
+					title="Custom Title"
+					description="Custom description text"
+				/>,
+				scratch
+			);
+
+			const title = scratch.querySelector("h2");
+			const description = scratch.querySelector("p");
+
+			expect(title!.textContent).to.equal("Custom Title");
+			expect(description!.textContent).to.equal("Custom description text");
+		});
+
+		it("should call onRefresh when button is clicked", () => {
+			const onRefresh = vi.fn();
+			render(<EmptyState onRefresh={onRefresh} />, scratch);
+
+			const button = scratch.querySelector("button")!;
+			button.click();
+
+			expect(onRefresh).toHaveBeenCalledOnce();
+		});
+
+		it("should render custom button text", () => {
+			const onRefresh = vi.fn();
+			render(
+				<EmptyState onRefresh={onRefresh} buttonText="Try Again" />,
+				scratch
+			);
+
+			const button = scratch.querySelector("button")!;
+			expect(button.textContent).to.equal("Try Again");
+		});
+	});
+
+	describe("UpdateItem", () => {
+		it("should render update signal name", () => {
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				prevValue: 0,
+				newValue: 1,
+				receivedAt: Date.now(),
+				depth: 0,
+			};
+
+			render(<UpdateItem update={update} />, scratch);
+
+			const signalName = scratch.querySelector(".signal-name");
+			expect(signalName!.textContent).to.contain("count");
+		});
+
+		it("should render effect signal name with effect type", () => {
+			const update = {
+				type: "effect" as const,
+				signalType: "effect" as const,
+				signalName: "logEffect",
+				receivedAt: Date.now(),
+			};
+
+			render(<UpdateItem update={update} />, scratch);
+
+			const signalName = scratch.querySelector(".signal-name");
+			expect(signalName!.textContent).to.contain("logEffect");
+		});
+
+		it("should format and display prev and new values", () => {
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				prevValue: 42,
+				newValue: 43,
+				receivedAt: Date.now(),
+				depth: 0,
+			};
+
+			render(<UpdateItem update={update} />, scratch);
+
+			const prevValue = scratch.querySelector(".value-prev");
+			const newValue = scratch.querySelector(".value-new");
+
+			expect(prevValue!.textContent).to.equal("42");
+			expect(newValue!.textContent).to.equal("43");
+		});
+
+		it("should format string values with quotes", () => {
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "message",
+				prevValue: "hello",
+				newValue: "world",
+				receivedAt: Date.now(),
+				depth: 0,
+			};
+
+			render(<UpdateItem update={update} />, scratch);
+
+			const prevValue = scratch.querySelector(".value-prev");
+			const newValue = scratch.querySelector(".value-new");
+
+			expect(prevValue!.textContent).to.equal('"hello"');
+			expect(newValue!.textContent).to.equal('"world"');
+		});
+
+		it("should format null and undefined values", () => {
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "value",
+				prevValue: null,
+				newValue: undefined,
+				receivedAt: Date.now(),
+				depth: 0,
+			};
+
+			render(<UpdateItem update={update} />, scratch);
+
+			const prevValue = scratch.querySelector(".value-prev");
+			const newValue = scratch.querySelector(".value-new");
+
+			expect(prevValue!.textContent).to.equal("null");
+			expect(newValue!.textContent).to.equal("undefined");
+		});
+
+		it("should display count badge when count is provided", () => {
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "counter",
+				prevValue: 0,
+				newValue: 1,
+				receivedAt: Date.now(),
+				depth: 0,
+			};
+
+			render(<UpdateItem update={update} count={5} />, scratch);
+
+			const countBadge = scratch.querySelector(".update-count");
+			expect(countBadge).to.not.be.null;
+			expect(countBadge!.textContent).to.equal("x5");
+		});
+
+		it("should display time", () => {
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "counter",
+				prevValue: 0,
+				newValue: 1,
+				receivedAt: Date.now(),
+				timestamp: Date.now(),
+				depth: 0,
+			};
+
+			render(<UpdateItem update={update} />, scratch);
+
+			const time = scratch.querySelector(".update-time");
+			expect(time).to.not.be.null;
+			expect(time!.textContent).to.not.be.empty;
+		});
+	});
+
+	describe("DevToolsPanel", () => {
+		beforeEach(() => {
+			initDevTools(mockAdapter);
+		});
+
+		it("should render header by default", () => {
+			render(<DevToolsPanel />, scratch);
+
+			const header = scratch.querySelector(".header");
+			expect(header).to.not.be.null;
+		});
+
+		it("should hide header when hideHeader is true", () => {
+			render(<DevToolsPanel hideHeader />, scratch);
+
+			const header = scratch.querySelector(".header");
+			expect(header).to.be.null;
+		});
+
+		it("should render tabs", () => {
+			render(<DevToolsPanel />, scratch);
+
+			const tabs = scratch.querySelectorAll(".tab");
+			expect(tabs.length).to.equal(4);
+			expect(tabs[0].textContent).to.equal("Updates");
+			expect(tabs[1].textContent).to.equal("Performance");
+			expect(tabs[2].textContent).to.equal("Timeline");
+			expect(tabs[3].textContent).to.equal("Dependency Graph");
+		});
+
+		it("should show updates tab as active by default", () => {
+			render(<DevToolsPanel />, scratch);
+
+			const updatesTab = scratch.querySelector(".tab.active");
+			expect(updatesTab!.textContent).to.equal("Updates");
+		});
+
+		it("should show graph tab as active when initialTab is graph", () => {
+			render(<DevToolsPanel initialTab="graph" />, scratch);
+
+			const activeTab = scratch.querySelector(".tab.active");
+			expect(activeTab!.textContent).to.equal("Dependency Graph");
+		});
+
+		it("should show performance tab as active when initialTab is performance", () => {
+			render(<DevToolsPanel initialTab="performance" />, scratch);
+
+			const activeTab = scratch.querySelector(".tab.active");
+			expect(activeTab!.textContent).to.equal("Performance");
+		});
+
+		it("should show timeline tab as active when initialTab is timeline", () => {
+			render(<DevToolsPanel initialTab="timeline" />, scratch);
+
+			const activeTab = scratch.querySelector(".tab.active");
+			expect(activeTab!.textContent).to.equal("Timeline");
+		});
+
+		it("should switch tabs when clicked", () => {
+			render(<DevToolsPanel />, scratch);
+
+			const graphTab = scratch.querySelectorAll(".tab")[3] as HTMLButtonElement;
+			act(() => {
+				graphTab.click();
+			});
+
+			const activeTab = scratch.querySelector(".tab.active");
+			expect(activeTab!.textContent).to.equal("Dependency Graph");
+		});
+
+		it("should show empty state when not connected", () => {
+			// Create adapter that reports not connected
+			const disconnectedAdapter = createMockAdapter({
+				isSignalsAvailable: vi.fn().mockReturnValue(false),
+			});
+			destroyDevTools();
+			initDevTools(disconnectedAdapter);
+
+			render(<DevToolsPanel />, scratch);
+
+			const emptyState = scratch.querySelector(".empty-state");
+			expect(emptyState).to.not.be.null;
+		});
+
+		it("should have main content area", () => {
+			render(<DevToolsPanel />, scratch);
+
+			const mainContent = scratch.querySelector(".main-content");
+			expect(mainContent).to.not.be.null;
+		});
+	});
+
+	describe("Header", () => {
+		beforeEach(() => {
+			initDevTools(mockAdapter);
+		});
+
+		it("should render title", () => {
+			render(<Header />, scratch);
+
+			const title = scratch.querySelector("h1");
+			expect(title!.textContent).to.equal("Signals");
+		});
+
+		it("should render status indicator", () => {
+			render(<Header />, scratch);
+
+			const statusIndicator = scratch.querySelector(".connection-status");
+			expect(statusIndicator).to.not.be.null;
+		});
+
+		it("should render control buttons", () => {
+			render(<Header />, scratch);
+
+			const buttons = scratch.querySelectorAll(".header-controls button");
+			expect(buttons.length).to.be.greaterThan(0);
+		});
+
+		it("should have Clear button", () => {
+			render(<Header />, scratch);
+
+			const buttons = scratch.querySelectorAll(".header-controls button");
+			const clearButton = Array.from(buttons).find(
+				b => b.textContent === "Clear"
+			);
+			expect(clearButton).to.not.be.undefined;
+		});
+
+		it("should have Pause button", () => {
+			render(<Header />, scratch);
+
+			const buttons = scratch.querySelectorAll(".header-controls button");
+			const pauseButton = Array.from(buttons).find(
+				b => b.textContent === "Pause"
+			);
+			expect(pauseButton).to.not.be.undefined;
+		});
+
+		it("should have Settings button", () => {
+			render(<Header />, scratch);
+
+			const buttons = scratch.querySelectorAll(".header-controls button");
+			const settingsButton = Array.from(buttons).find(
+				b => b.textContent === "Settings"
+			);
+			expect(settingsButton).to.not.be.undefined;
+		});
+
+		it("should toggle pause state when Pause button is clicked", () => {
+			render(<Header />, scratch);
+
+			let buttons = scratch.querySelectorAll(".header-controls button");
+			const pauseButton = Array.from(buttons).find(
+				b => b.textContent === "Pause"
+			) as HTMLButtonElement;
+
+			act(() => {
+				pauseButton.click();
+			});
+
+			// Re-query after click to get updated button text
+			buttons = scratch.querySelectorAll(".header-controls button");
+			const resumeButton = Array.from(buttons).find(
+				b => b.textContent === "Resume"
+			);
+			expect(resumeButton).to.not.be.undefined;
+		});
+	});
+
+	describe("SettingsPanel", () => {
+		beforeEach(() => {
+			initDevTools(mockAdapter);
+		});
+
+		it("should close when Cancel is clicked", () => {
+			render(<SettingsPanel />, scratch);
+
+			const popover = scratch.querySelector<HTMLDivElement>(
+				"#settings-panel-popover"
+			)!;
+			popover.showPopover();
+			expect(popover.matches(":popover-open")).to.be.true;
+
+			const cancelButton = Array.from(scratch.querySelectorAll("button")).find(
+				button => button.textContent === "Cancel"
+			)!;
+			cancelButton.click();
+
+			expect(popover.matches(":popover-open")).to.be.false;
+		});
+
+		it("should apply settings and close when Apply is clicked", () => {
+			render(<SettingsPanel />, scratch);
+
+			const popover = scratch.querySelector<HTMLDivElement>(
+				"#settings-panel-popover"
+			)!;
+			popover.showPopover();
+
+			const applyButton = Array.from(scratch.querySelectorAll("button")).find(
+				button => button.textContent === "Apply"
+			)!;
+			applyButton.click();
+
+			expect(mockAdapter.sendConfig).toHaveBeenCalledOnce();
+			expect(popover.matches(":popover-open")).to.be.false;
+		});
+	});
+
+	describe("UpdatesContainer", () => {
+		beforeEach(() => {
+			initDevTools(mockAdapter);
+		});
+
+		it("should render updates stats", () => {
+			render(<UpdatesContainer />, scratch);
+
+			const stats = scratch.querySelector(".updates-stats");
+			expect(stats).to.not.be.null;
+		});
+
+		it("should display updates count", () => {
+			render(<UpdatesContainer />, scratch);
+
+			const updatesText = scratch.textContent;
+			expect(updatesText).to.contain("Updates:");
+		});
+
+		it("should display signals count", () => {
+			render(<UpdatesContainer />, scratch);
+
+			const updatesText = scratch.textContent;
+			expect(updatesText).to.contain("Signals:");
+		});
+
+		it("should have updates list container", () => {
+			render(<UpdatesContainer />, scratch);
+
+			const updatesList = scratch.querySelector(".updates-list");
+			expect(updatesList).to.not.be.null;
+		});
+	});
+
+	describe("Timeline", () => {
+		beforeEach(() => {
+			initDevTools(mockAdapter);
+		});
+
+		it("keeps each runtime callback as an ordered, inspectable cascade", () => {
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				signalId: "signal-count-1",
+				prevValue: 0,
+				newValue: 1,
+				timestamp: 123,
+				receivedAt: 0,
+				depth: 0,
+			};
+			const dependent = {
+				type: "update" as const,
+				signalType: "computed" as const,
+				signalName: "doubled",
+				signalId: "computed-doubled-1",
+				prevValue: 0,
+				newValue: 2,
+				timestamp: 124,
+				receivedAt: 0,
+				depth: 1,
+			};
+
+			mockAdapter._emit("signalUpdate", [update, dependent]);
+			const { timelineBatches } = getContext().updatesStore;
+			expect(timelineBatches.value).to.have.length(1);
+			expect(
+				timelineBatches.value[0].updates.map(item => item.signalId)
+			).to.deep.equal(["signal-count-1", "computed-doubled-1"]);
+			expect(
+				timelineBatches.value[0].updates.map(item => item.sequence)
+			).to.deep.equal([1, 2]);
+			expect(timelineBatches.value[0].updates[0].timestamp).to.equal(123);
+
+			render(<Timeline />, scratch);
+
+			expect(scratch.querySelectorAll(".timeline-batch")).to.have.length(1);
+			expect(scratch.querySelectorAll(".timeline-event")).to.have.length(2);
+			expect(
+				scratch.querySelector(".timeline-event")?.getAttribute("data-signal-id")
+			).to.equal("signal-count-1");
+			expect(scratch.textContent).to.contain("Cascade 1");
+		});
+
+		it("focuses signals by runtime ID instead of merging same-named signals", () => {
+			const makeUpdate = (signalId: string, newValue: number) => ({
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				signalId,
+				prevValue: newValue - 1,
+				newValue,
+				receivedAt: 0,
+				depth: 0,
+			});
+			mockAdapter._emit("signalUpdate", [makeUpdate("count-a", 1)]);
+			mockAdapter._emit("signalUpdate", [makeUpdate("count-b", 2)]);
+			render(<Timeline />, scratch);
+
+			const focus = scratch.querySelector(
+				'[aria-label="Focus a signal"]'
+			) as HTMLSelectElement;
+			act(() => {
+				focus.value = "count-a";
+				focus.dispatchEvent(new Event("change", { bubbles: true }));
+			});
+
+			expect(scratch.querySelectorAll(".timeline-batch")).to.have.length(1);
+			expect(scratch.textContent).to.contain("1 of 2 cascades");
+			expect(
+				scratch.querySelector(".timeline-event")?.getAttribute("data-signal-id")
+			).to.equal("count-a");
+		});
+
+		it("filters cascades by signal name or runtime ID", () => {
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "effect" as const,
+					signalType: "effect" as const,
+					signalName: "saveToStorage",
+					signalId: "effect-save-1",
+					receivedAt: 0,
+					depth: 0,
+				},
+			]);
+			render(<Timeline />, scratch);
+
+			const search = scratch.querySelector(
+				'[aria-label="Find cascades by signal name or ID"]'
+			) as HTMLInputElement;
+			act(() => {
+				search.value = "effect-save-1";
+				search.dispatchEvent(new Event("input", { bubbles: true }));
+			});
+
+			expect(scratch.querySelectorAll(".timeline-batch")).to.have.length(1);
+			expect(scratch.querySelector(".timeline-event.is-match")).to.not.be.null;
+		});
+
+		it("bounds retained cascade history so memory does not grow unbounded", () => {
+			const makeUpdate = (i: number) => ({
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: `sig-${i}`,
+				signalId: `sig-${i}`,
+				prevValue: i - 1,
+				newValue: i,
+				receivedAt: 0,
+				depth: 0,
+			});
+			const overflow = 10;
+			for (let i = 0; i < MAX_TIMELINE_BATCHES + overflow; i++) {
+				mockAdapter._emit("signalUpdate", [makeUpdate(i)]);
+			}
+			const { timelineBatches } = getContext().updatesStore;
+			expect(timelineBatches.value).to.have.length(MAX_TIMELINE_BATCHES);
+			// Oldest cascades are dropped, newest retained.
+			expect(timelineBatches.value[0].updates[0].signalName).to.equal(
+				`sig-${overflow}`
+			);
+
+			render(<Timeline />, scratch);
+			// Rendering is bounded independently of the memory cap.
+			expect(scratch.querySelectorAll(".timeline-batch")).to.have.length(
+				MAX_VISIBLE_BATCHES
+			);
+			expect(scratch.textContent).to.contain("latest 100 shown");
+		});
+
+		it("clears timeline cascades alongside the Updates tree", () => {
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: "count",
+					signalId: "count-1",
+					prevValue: 0,
+					newValue: 1,
+					receivedAt: 0,
+					depth: 0,
+				},
+			]);
+			const { updatesStore } = getContext();
+			expect(updatesStore.timelineBatches.value).to.have.length(1);
+
+			updatesStore.clearUpdates();
+			expect(updatesStore.timelineBatches.value).to.have.length(0);
+			expect(updatesStore.hasUpdates.value).to.be.false;
+		});
+	});
+
+	describe("mount function", () => {
+		it("should mount DevTools panel into container", async () => {
+			const container = document.createElement("div");
+			document.body.appendChild(container);
+
+			const unmount = await mount({
+				adapter: mockAdapter,
+				container,
+			});
+
+			expect(container.querySelector(".signals-devtools")).to.not.be.null;
+			expect(mockAdapter.connect).toHaveBeenCalled();
+
+			unmount();
+			container.remove();
+		});
+
+		it("should call adapter.connect on mount", async () => {
+			const container = document.createElement("div");
+			document.body.appendChild(container);
+
+			const unmount = await mount({
+				adapter: mockAdapter,
+				container,
+			});
+
+			expect(mockAdapter.connect).toHaveBeenCalledOnce();
+
+			unmount();
+			container.remove();
+		});
+
+		it("should accept hideHeader option", async () => {
+			const container = document.createElement("div");
+			document.body.appendChild(container);
+
+			const unmount = await mount({
+				adapter: mockAdapter,
+				container,
+				hideHeader: true,
+			});
+
+			expect(container.querySelector(".header")).to.be.null;
+
+			unmount();
+			container.remove();
+		});
+
+		it("should accept initialTab option", async () => {
+			const container = document.createElement("div");
+			document.body.appendChild(container);
+
+			const unmount = await mount({
+				adapter: mockAdapter,
+				container,
+				initialTab: "graph",
+			});
+
+			const activeTab = container.querySelector(".tab.active");
+			expect(activeTab!.textContent).to.equal("Dependency Graph");
+
+			unmount();
+			container.remove();
+		});
+
+		it("should call adapter.disconnect on unmount", async () => {
+			const container = document.createElement("div");
+			document.body.appendChild(container);
+
+			const unmount = await mount({
+				adapter: mockAdapter,
+				container,
+			});
+
+			unmount();
+
+			expect(mockAdapter.disconnect).toHaveBeenCalled();
+			container.remove();
+		});
+	});
+
+	describe("Context", () => {
+		it("should throw error when getContext is called before init", () => {
+			expect(() => getContext()).to.throw("DevTools context not initialized");
+		});
+
+		it("should return context after initDevTools", () => {
+			initDevTools(mockAdapter);
+
+			const context = getContext();
+			expect(context).to.not.be.null;
+			expect(context.adapter).to.equal(mockAdapter);
+		});
+
+		it("should have connectionStore in context", () => {
+			initDevTools(mockAdapter);
+
+			const context = getContext();
+			expect(context.connectionStore).to.not.be.undefined;
+		});
+
+		it("should have updatesStore in context", () => {
+			initDevTools(mockAdapter);
+
+			const context = getContext();
+			expect(context.updatesStore).to.not.be.undefined;
+		});
+
+		it("should have settingsStore in context", () => {
+			initDevTools(mockAdapter);
+
+			const context = getContext();
+			expect(context.settingsStore).to.not.be.undefined;
+		});
+
+		it("should clear context on destroyDevTools", () => {
+			initDevTools(mockAdapter);
+			destroyDevTools();
+
+			expect(() => getContext()).to.throw("DevTools context not initialized");
+		});
+	});
+
+	describe("ConnectionStore", () => {
+		it("should have initial connecting status", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			// Initial status before any events
+			expect(context.connectionStore.status.value).to.be.a("string");
+		});
+
+		it("should update status on connectionStatusChanged event", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			mockAdapter._emit("connectionStatusChanged", {
+				status: "connected",
+				message: "Connected to signals",
+			});
+
+			expect(context.connectionStore.status.value).to.equal("connected");
+			expect(context.connectionStore.message.value).to.equal(
+				"Connected to signals"
+			);
+		});
+
+		it("should update isConnected on signalsAvailable event", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			mockAdapter._emit("signalsAvailable", true);
+
+			expect(context.connectionStore.isConnected.value).to.be.true;
+		});
+
+		it("should call requestState on refreshConnection", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			context.connectionStore.refreshConnection();
+
+			expect(mockAdapter.requestState).toHaveBeenCalled();
+		});
+	});
+
+	describe("UpdatesStore", () => {
+		it("should start with empty updates", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			expect(context.updatesStore.hasUpdates.value).to.be.false;
+		});
+
+		it("should add updates when signalUpdate event is received", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				prevValue: 0,
+				newValue: 1,
+				receivedAt: Date.now(),
+			};
+
+			mockAdapter._emit("signalUpdate", [update]);
+
+			expect(context.updatesStore.hasUpdates.value).to.be.true;
+		});
+
+		it("should not add updates when paused", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			context.updatesStore.isPaused.value = true;
+
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				prevValue: 0,
+				newValue: 1,
+				receivedAt: Date.now(),
+			};
+
+			mockAdapter._emit("signalUpdate", [update]);
+
+			expect(context.updatesStore.hasUpdates.value).to.be.false;
+		});
+
+		it("should clear updates on clearUpdates", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			const update = {
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				prevValue: 0,
+				newValue: 1,
+				receivedAt: Date.now(),
+			};
+
+			mockAdapter._emit("signalUpdate", [update]);
+			expect(context.updatesStore.hasUpdates.value).to.be.true;
+
+			context.updatesStore.clearUpdates();
+			expect(context.updatesStore.hasUpdates.value).to.be.false;
+		});
+
+		it("should track signal counts", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			const updates = [
+				{
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: "count",
+					prevValue: 0,
+					newValue: 1,
+					receivedAt: Date.now(),
+				},
+				{
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: "count",
+					prevValue: 1,
+					newValue: 2,
+					receivedAt: Date.now(),
+				},
+				{
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: "name",
+					prevValue: "a",
+					newValue: "b",
+					receivedAt: Date.now(),
+				},
+			];
+
+			mockAdapter._emit("signalUpdate", updates);
+
+			const signalCounts = context.updatesStore.signalCounts.value;
+			expect(signalCounts.get("count")).to.equal(2);
+			expect(signalCounts.get("name")).to.equal(1);
+		});
+
+		it("should track disposed signal IDs", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			const disposal = {
+				type: "disposed" as const,
+				signalType: "signal" as const,
+				signalName: "count",
+				signalId: "signal-123",
+				timestamp: Date.now(),
+			};
+
+			mockAdapter._emit("signalDisposed", [disposal]);
+
+			expect(context.updatesStore.disposedSignalIds.value.has("signal-123")).to
+				.be.true;
+		});
+	});
+
+	describe("PerformanceInsights", () => {
+		it("keeps same-named runtime instances separate and uses explicit recomputation metadata", () => {
+			const observations: PerformanceObservation[] = [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "total",
+					signalId: "computed-total-a",
+					prevValue: { total: 1 },
+					newValue: { total: 1 },
+					receivedAt: 1,
+					recomputed: true,
+					outputChanged: false,
+				},
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "total",
+					signalId: "computed-total-b",
+					prevValue: { total: 1 },
+					newValue: { total: 1 },
+					receivedAt: 2,
+					recomputed: true,
+					outputChanged: true,
+				},
+			];
+
+			const insights = derivePerformanceInsights(observations);
+			// Two instances with one observation each cannot be disproportionate to
+			// the median baseline (median 1, threshold 2), so neither is a hotspot.
+			expect(insights.hotspots).to.have.length(0);
+			expect(insights.hotspotPopulation).to.equal(2);
+			expect(insights.redundantWork).to.have.length(1);
+			expect(insights.redundantWork[0].signalId).to.equal("computed-total-a");
+			expect(insights.redundantWork[0].noOutputChangeCount).to.equal(1);
+		});
+
+		it("bounds observations and clears performance insights with updates", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+			const updates = Array.from({ length: 1001 }, (_, index) => ({
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: `signal-${index}`,
+				signalId: `signal-${index}`,
+				receivedAt: index,
+			}));
+
+			mockAdapter._emit("signalUpdate", updates);
+
+			expect(context.updatesStore.performanceObservations.value).to.have.length(
+				1000
+			);
+			expect(context.performanceStore.insights.value.observationCount).to.equal(
+				1000
+			);
+
+			context.updatesStore.clearUpdates();
+			expect(context.performanceStore.insights.value.observationCount).to.equal(
+				0
+			);
+		});
+
+		it("does not collect performance observations when paused", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			context.updatesStore.isPaused.value = true;
+
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "parity",
+					signalId: "computed-parity",
+					prevValue: 0,
+					newValue: 0,
+					receivedAt: Date.now(),
+					recomputed: true,
+					outputChanged: false,
+				},
+			]);
+
+			expect(context.updatesStore.performanceObservations.value).to.have.length(
+				0
+			);
+			expect(context.performanceStore.insights.value.observationCount).to.equal(
+				0
+			);
+		});
+
+		it("excludes no-output-change recomputations from the visible Updates view", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "parity",
+					signalId: "computed-parity",
+					prevValue: 0,
+					newValue: 0,
+					receivedAt: Date.now(),
+					recomputed: true,
+					outputChanged: false,
+				},
+			]);
+
+			// The performance observation is still collected...
+			expect(context.updatesStore.performanceObservations.value).to.have.length(
+				1
+			);
+			// ...but the visible Updates list stays empty.
+			expect(context.updatesStore.hasUpdates.value).to.be.false;
+		});
+
+		it("renders metric definitions and no-output-change recomputations", () => {
+			initDevTools(mockAdapter);
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "parity",
+					signalId: "computed-parity",
+					prevValue: 0,
+					newValue: 0,
+					receivedAt: Date.now(),
+					recomputed: true,
+					outputChanged: false,
+				},
+			]);
+
+			render(<PerformanceInsights />, scratch);
+
+			expect(scratch.textContent).to.contain(
+				"not by display name. This measures activity, not elapsed time."
+			);
+			expect(scratch.textContent).to.contain(
+				"does not compare serialized values"
+			);
+			expect(scratch.textContent).to.contain("parity");
+		});
+
+		it("exports the derived performance insights as JSON", async () => {
+			initDevTools(mockAdapter);
+			mockAdapter._emit("signalUpdate", [
+				...Array.from({ length: 4 }, (_, index) => ({
+					type: "update" as const,
+					signalType: "computed" as const,
+					signalName: "hot",
+					signalId: "signal-hot",
+					prevValue: index,
+					newValue: index,
+					receivedAt: index,
+					recomputed: true as const,
+					outputChanged: false,
+				})),
+				...[
+					["signal-a", "a"],
+					["signal-b", "b"],
+					["signal-c", "c"],
+				].map(([signalId, signalName], index) => ({
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalId,
+					signalName,
+					receivedAt: 10 + index,
+				})),
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "parity",
+					signalId: "computed-parity",
+					prevValue: 0,
+					newValue: 0,
+					receivedAt: 20,
+					recomputed: true,
+					outputChanged: false,
+					subscribedTo: "signal-hot",
+				},
+				{
+					type: "update",
+					signalType: "signal",
+					signalName: "anonymous",
+					receivedAt: 21,
+				},
+			]);
+
+			let copiedText = "";
+			const originalExecCommand = document.execCommand;
+			document.execCommand = vi.fn(command => {
+				copiedText =
+					(
+						document.body.querySelector(
+							"textarea"
+						) as HTMLTextAreaElement | null
+					)?.value ?? "";
+				return command === "copy";
+			});
+
+			try {
+				render(<PerformanceInsights />, scratch);
+				await act(async () => {
+					(
+						scratch.querySelector(
+							".performance-export-button"
+						) as HTMLButtonElement
+					).click();
+				});
+			} finally {
+				document.execCommand = originalExecCommand;
+			}
+
+			const exported = JSON.parse(copiedText);
+			expect(Object.keys(exported).sort()).to.deep.equal([
+				"hotspotBaseline",
+				"hotspotPopulation",
+				"hotspots",
+				"observationCount",
+				"redundantWork",
+				"unidentifiedObservationCount",
+			]);
+			expect(exported.observationCount).to.equal(9);
+			expect(exported.unidentifiedObservationCount).to.equal(1);
+			expect(exported.hotspotBaseline).to.equal(1);
+			expect(exported.hotspotPopulation).to.equal(5);
+			expect(exported.hotspots).to.have.length(1);
+			expect(exported.hotspots[0].signalId).to.equal("signal-hot");
+			expect(exported.hotspots[0]).to.not.have.property("recentOccurrences");
+			expect(exported.redundantWork).to.have.length(2);
+			const parity = exported.redundantWork.find(
+				(summary: { signalId: string }) =>
+					summary.signalId === "computed-parity"
+			)!;
+			expect(parity.recentOccurrences[0].subscribedTo).to.equal("signal-hot");
+			expect(copiedText).to.not.contain("prevValue");
+			expect(copiedText).to.not.contain("newValue");
+			expect(scratch.textContent).to.contain("Copied to clipboard!");
+		});
+
+		it("filters hotspots against the median baseline with >=2x and >=4x tiers", () => {
+			// Three quiet instances (1 update each) establish a median of 1.
+			// One instance with 2 updates is exactly 2x (elevated), one with 4
+			// updates is 4x (severe), and one with 1 update is below threshold.
+			const observations: PerformanceObservation[] = [
+				...["a", "b", "c"].map((id, i) => ({
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: id,
+					signalId: `signal-${id}`,
+					receivedAt: i,
+				})),
+				...Array.from({ length: 2 }, (_, i) => ({
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: "elevated",
+					signalId: "signal-elevated",
+					receivedAt: 10 + i,
+				})),
+				...Array.from({ length: 4 }, (_, i) => ({
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: "severe",
+					signalId: "signal-severe",
+					receivedAt: 20 + i,
+				})),
+			];
+
+			const insights = derivePerformanceInsights(observations);
+			expect(insights.hotspotBaseline).to.equal(1);
+			expect(insights.hotspotPopulation).to.equal(5);
+			expect(insights.hotspots).to.have.length(2);
+			const elevated = insights.hotspots.find(
+				h => h.signalId === "signal-elevated"
+			)!;
+			const severe = insights.hotspots.find(
+				h => h.signalId === "signal-severe"
+			)!;
+			expect(elevated.hotspotTier).to.equal("elevated");
+			expect(severe.hotspotTier).to.equal("severe");
+			// Severe (4 updates) ranks above elevated (2 updates).
+			expect(insights.hotspots[0].signalId).to.equal("signal-severe");
+		});
+
+		it("reports no hotspots when no instance reaches 2x the median", () => {
+			const observations: PerformanceObservation[] = [
+				...Array.from({ length: 3 }, (_, i) => ({
+					type: "update" as const,
+					signalType: "signal" as const,
+					signalName: "even",
+					signalId: `signal-${i}`,
+					receivedAt: i,
+				})),
+			];
+
+			const insights = derivePerformanceInsights(observations);
+			expect(insights.hotspotPopulation).to.equal(3);
+			expect(insights.hotspotBaseline).to.equal(1);
+			expect(insights.hotspots).to.have.length(0);
+		});
+
+		it("does not compute a baseline for a single identified instance", () => {
+			const observations: PerformanceObservation[] = [
+				{
+					type: "update",
+					signalType: "signal",
+					signalName: "lonely",
+					signalId: "signal-lonely",
+					receivedAt: 1,
+				},
+			];
+
+			const insights = derivePerformanceInsights(observations);
+			expect(insights.hotspotPopulation).to.equal(1);
+			expect(insights.hotspotBaseline).to.equal(0);
+			expect(insights.hotspots).to.have.length(0);
+		});
+
+		it("renders the baseline explanation and honest empty-hotspots message", () => {
+			initDevTools(mockAdapter);
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "update",
+					signalType: "signal",
+					signalName: "solo",
+					signalId: "signal-solo",
+					receivedAt: Date.now(),
+				},
+			]);
+
+			render(<PerformanceInsights />, scratch);
+
+			expect(scratch.textContent).to.contain(
+				"disproportionate to the median per-instance activity"
+			);
+			expect(scratch.textContent).to.contain("≥2×");
+			expect(scratch.textContent).to.contain("≥4×");
+			expect(scratch.textContent).to.contain(
+				"Not enough identified instances to compute a defensible median baseline"
+			);
+		});
+
+		it("retains verbatim trigger and dependency metadata in recent occurrences", () => {
+			const observations: PerformanceObservation[] = [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "parity",
+					signalId: "computed-parity",
+					prevValue: 0,
+					newValue: 0,
+					receivedAt: 100,
+					timestamp: 9001,
+					recomputed: true,
+					outputChanged: false,
+					subscribedTo: "signal-count",
+					allDependencies: [
+						{
+							id: "signal-count",
+							name: "count",
+							type: "signal" as const,
+						},
+					],
+				},
+			];
+
+			const insights = derivePerformanceInsights(observations);
+			expect(insights.redundantWork).to.have.length(1);
+			const entry = insights.redundantWork[0];
+			expect(entry.recentOccurrences).to.have.length(1);
+			const occurrence = entry.recentOccurrences![0];
+			expect(occurrence.signalId).to.equal("computed-parity");
+			expect(occurrence.subscribedTo).to.equal("signal-count");
+			expect(occurrence.timestamp).to.equal(9001);
+			expect(occurrence.receivedAt).to.equal(100);
+			expect(occurrence.allDependencies).to.have.length(1);
+			expect(occurrence.allDependencies![0]).to.deep.equal({
+				id: "signal-count",
+				name: "count",
+				type: "signal",
+			});
+		});
+
+		it("does not infer no-output-change from serialized value equality", () => {
+			// Both observations have identical prev/new values, but only the
+			// runtime's `outputChanged` flag determines the count — serialized
+			// equality is never consulted.
+			const observations: PerformanceObservation[] = [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "same",
+					signalId: "computed-same-false",
+					prevValue: { v: 1 },
+					newValue: { v: 1 },
+					receivedAt: 1,
+					recomputed: true,
+					outputChanged: false,
+				},
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "same",
+					signalId: "computed-same-true",
+					prevValue: { v: 1 },
+					newValue: { v: 1 },
+					receivedAt: 2,
+					recomputed: true,
+					outputChanged: true,
+				},
+			];
+
+			const insights = derivePerformanceInsights(observations);
+			const flagged = insights.redundantWork.find(
+				e => e.signalId === "computed-same-false"
+			)!;
+			const notFlagged = insights.redundantWork.find(
+				e => e.signalId === "computed-same-true"
+			);
+			expect(flagged.noOutputChangeCount).to.equal(1);
+			expect(notFlagged).to.be.undefined;
+		});
+
+		it("bounds recent occurrences to the most recent window", () => {
+			const observations: PerformanceObservation[] = Array.from(
+				{ length: MAX_RECENT_OCCURRENCES + 5 },
+				(_, i) => ({
+					type: "update" as const,
+					signalType: "computed" as const,
+					signalName: "parity",
+					signalId: "computed-parity",
+					prevValue: 0,
+					newValue: 0,
+					receivedAt: i,
+					timestamp: i,
+					recomputed: true as const,
+					outputChanged: false,
+				})
+			);
+
+			const insights = derivePerformanceInsights(observations);
+			const entry = insights.redundantWork[0];
+			expect(entry.noOutputChangeCount).to.equal(MAX_RECENT_OCCURRENCES + 5);
+			expect(entry.recentOccurrences).to.have.length(MAX_RECENT_OCCURRENCES);
+			// Most recent first.
+			expect(entry.recentOccurrences![0].receivedAt).to.equal(
+				MAX_RECENT_OCCURRENCES + 4
+			);
+		});
+
+		it("expands a redundant-work row to show trigger source and dependencies", () => {
+			initDevTools(mockAdapter);
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "parity",
+					signalId: "computed-parity",
+					prevValue: 0,
+					newValue: 0,
+					receivedAt: Date.now(),
+					timestamp: 12345,
+					recomputed: true,
+					outputChanged: false,
+					subscribedTo: "signal-count",
+					allDependencies: [
+						{
+							id: "signal-count",
+							name: "count",
+							type: "signal" as const,
+						},
+					],
+				},
+			]);
+
+			render(<PerformanceInsights />, scratch);
+
+			const inspectButton = scratch.querySelector<HTMLButtonElement>(
+				".performance-expand-toggle"
+			);
+			expect(inspectButton).to.not.be.null;
+			expect(inspectButton!.getAttribute("aria-expanded")).to.equal("false");
+			expect(inspectButton!.textContent).to.equal("▶");
+
+			// Before expanding, occurrence details are not rendered.
+			expect(scratch.querySelector(".performance-occurrence-detail")).to.be
+				.null;
+
+			act(() => {
+				inspectButton!.click();
+			});
+			expect(inspectButton!.getAttribute("aria-expanded")).to.equal("true");
+			expect(inspectButton!.textContent).to.equal("▼");
+
+			const detail = scratch.querySelector(".performance-occurrence-detail");
+			expect(detail).to.not.be.null;
+			const trigger = detail!.querySelector(".performance-trigger-source");
+			expect(trigger).to.not.be.null;
+			expect(trigger!.textContent).to.contain("signal");
+			expect(trigger!.textContent).to.contain("count");
+			expect(trigger!.textContent).to.contain("signal-count");
+			expect(detail!.textContent).to.contain("Triggered by");
+			expect(detail!.textContent).to.contain("Current dependencies");
+		});
+	});
+
+	describe("SettingsStore", () => {
+		it("should have default settings", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			expect(context.settingsStore.settings.value.enabled).to.be.true;
+			expect(context.settingsStore.settings.value.grouped).to.be.true;
+			expect(context.settingsStore.settings.value.maxUpdatesPerSecond).to.equal(
+				60
+			);
+		});
+
+		it("should apply settings and call sendConfig", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			const newSettings = {
+				enabled: false,
+				grouped: false,
+				maxUpdatesPerSecond: 30,
+				filterPatterns: ["test"],
+			};
+
+			context.settingsStore.applySettings(newSettings);
+
+			expect(mockAdapter.sendConfig).toHaveBeenCalledWith(newSettings);
+			expect(context.settingsStore.settings.value.enabled).to.be.false;
+			expect(context.settingsStore.settings.value.maxUpdatesPerSecond).to.equal(
+				30
+			);
+		});
+
+		it("should update settings on configReceived event", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			mockAdapter._emit("configReceived", {
+				settings: {
+					enabled: false,
+					grouped: false,
+					maxUpdatesPerSecond: 100,
+					filterPatterns: ["pattern"],
+				},
+			});
+
+			expect(context.settingsStore.settings.value.enabled).to.be.false;
+			expect(context.settingsStore.settings.value.maxUpdatesPerSecond).to.equal(
+				100
+			);
+		});
+
+		it("should toggle showDisposedSignals", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			expect(context.settingsStore.showDisposedSignals.value).to.be.false;
+
+			context.settingsStore.toggleShowDisposedSignals();
+			expect(context.settingsStore.showDisposedSignals.value).to.be.true;
+		});
+	});
+
+	describe("GraphVisualization viewport helpers", () => {
+		it("should calculate bounds that include node radii", () => {
+			const bounds = calculateGraphBounds([
+				{
+					id: "signal-a",
+					name: "signalA",
+					type: "signal",
+					x: 100,
+					y: 100,
+					depth: 0,
+				},
+			]);
+
+			expect(bounds).to.not.be.null;
+			expect(bounds!.minX).to.be.lessThan(100);
+			expect(bounds!.minY).to.be.lessThan(100);
+			expect(bounds!.maxX).to.be.greaterThan(100);
+			expect(bounds!.maxY).to.be.greaterThan(100);
+		});
+
+		it("should fit tall graphs into short wide viewports", () => {
+			const transform = calculateFitTransform(
+				{
+					minX: 0,
+					minY: 0,
+					maxX: 600,
+					maxY: 3000,
+					width: 600,
+					height: 3000,
+				},
+				{ width: 1200, height: 400 }
+			);
+
+			expect(transform.zoom).to.be.lessThan(1);
+			expect(3000 * transform.zoom).to.be.at.most(400);
+			expect(transform.offset.x).to.be.greaterThan(0);
+		});
+
+		it("should extract the direct neighborhood around a node", () => {
+			const createNode = (id: string) => ({
+				id,
+				name: id,
+				type: "signal" as const,
+				x: 0,
+				y: 0,
+				depth: 0,
+			});
+			const neighborhood = filterGraphToNeighborhood(
+				{
+					nodes: ["upstream", "selected", "downstream", "second-hop"].map(
+						createNode
+					),
+					links: [
+						{ source: "upstream", target: "selected" },
+						{ source: "selected", target: "downstream" },
+						{ source: "downstream", target: "second-hop" },
+					],
+				},
+				"selected"
+			);
+
+			expect(neighborhood.nodes.map(node => node.id)).to.deep.equal([
+				"upstream",
+				"selected",
+				"downstream",
+			]);
+			expect(neighborhood.links).to.have.length(2);
+		});
+	});
+
+	describe("GraphVisualization - Dependency Node Creation", () => {
+		beforeEach(() => {
+			initDevTools(mockAdapter);
+		});
+
+		it("should render empty state when no updates", () => {
+			render(<GraphVisualization />, scratch);
+
+			const emptyState = scratch.querySelector(".graph-empty");
+			expect(emptyState).to.not.be.null;
+			expect(emptyState!.textContent).to.contain("No Signal Dependencies");
+		});
+
+		it("should create nodes from allDependencies even if dependency never updated", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			// Simulate an update where a computed depends on signals that never sent updates themselves
+			// This tests the key feature: allDependencies with rich info allows graph to show
+			// dependencies that haven't had their own updates
+			const updateWithDependencies = {
+				type: "update" as const,
+				signalType: "computed" as const,
+				signalName: "sum",
+				signalId: "computed-sum-1",
+				prevValue: 0,
+				newValue: 10,
+				receivedAt: Date.now(),
+				depth: 1,
+				subscribedTo: "signal-a-1",
+				// Rich dependency info - these signals never sent updates themselves
+				allDependencies: [
+					{ id: "signal-a-1", name: "signalA", type: "signal" as const },
+					{ id: "signal-b-1", name: "signalB", type: "signal" as const },
+				] as DependencyInfo[],
+			};
+
+			// Add the update to the store
+			mockAdapter._emit("signalUpdate", [updateWithDependencies]);
+
+			render(<GraphVisualization />, scratch);
+
+			// The graph should now show all three nodes:
+			// - sum (the computed that updated)
+			// - signalA (dependency that never updated, but included in allDependencies)
+			// - signalB (dependency that never updated, but included in allDependencies)
+			const nodes = scratch.querySelectorAll(".graph-node");
+			expect(nodes.length).to.equal(3);
+
+			// Check that nodes have correct names rendered
+			const nodeTexts = scratch.querySelectorAll(".graph-text");
+			const textContents = Array.from(nodeTexts).map(t => t.textContent);
+			expect(textContents).to.include("sum");
+			expect(textContents).to.include("signalA");
+			expect(textContents).to.include("signalB");
+		});
+
+		it("should create nodes with correct types from allDependencies", () => {
+			initDevTools(mockAdapter);
+			const context = getContext();
+
+			// Test with mixed dependency types (signal and computed)
+			const updateWithMixedDeps = {
+				type: "update" as const,
+				signalType: "computed" as const,
+				signalName: "result",
+				signalId: "computed-result-1",
+				prevValue: 0,
+				newValue: 15,
+				receivedAt: Date.now(),
+				depth: 2,
+				allDependencies: [
+					{ id: "signal-base-1", name: "base", type: "signal" as const },
+					{
+						id: "computed-doubled-1",
+						name: "doubled",
+						type: "computed" as const,
+					},
+				] as DependencyInfo[],
+			};
+
+			mockAdapter._emit("signalUpdate", [updateWithMixedDeps]);
+
+			render(<GraphVisualization />, scratch);
+
+			// Check that nodes have correct CSS classes for their types
+			const signalNode = scratch.querySelector(".graph-node.signal");
+			const computedNodes = scratch.querySelectorAll(".graph-node.computed");
+
+			expect(signalNode).to.not.be.null;
+			// Should have 2 computed nodes: 'doubled' from deps and 'result' from the update
+			expect(computedNodes.length).to.equal(2);
+		});
+
+		it("should create links from allDependencies to the updating node", () => {
+			initDevTools(mockAdapter);
+
+			const updateWithDeps = {
+				type: "update" as const,
+				signalType: "computed" as const,
+				signalName: "total",
+				signalId: "computed-total-1",
+				prevValue: 0,
+				newValue: 100,
+				receivedAt: Date.now(),
+				depth: 1,
+				allDependencies: [
+					{ id: "signal-x-1", name: "x", type: "signal" as const },
+					{ id: "signal-y-1", name: "y", type: "signal" as const },
+				] as DependencyInfo[],
+			};
+
+			mockAdapter._emit("signalUpdate", [updateWithDeps]);
+
+			render(<GraphVisualization />, scratch);
+
+			// Should have links from both dependencies to the computed
+			const links = scratch.querySelectorAll(".graph-link");
+			expect(links.length).to.equal(2);
+		});
+
+		it("should wrap a dense full graph instead of shrinking it into a line", async () => {
+			initDevTools(mockAdapter);
+
+			const denseLayerUpdates = Array.from({ length: 1000 }, (_, index) => ({
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: `signal-${index}`,
+				signalId: `signal-${index}`,
+				prevValue: index,
+				newValue: index + 1,
+				receivedAt: Date.now(),
+			}));
+
+			mockAdapter._emit("signalUpdate", denseLayerUpdates);
+			render(<GraphVisualization />, scratch);
+			await act(async () => {
+				(
+					scratch.querySelector(
+						".graph-large-state button"
+					) as HTMLButtonElement
+				).click();
+			});
+
+			const nodes = Array.from(
+				scratch.querySelectorAll<SVGCircleElement>(".graph-node")
+			);
+			const xPositions = new Set(nodes.map(node => node.getAttribute("cx")));
+			const yPositions = new Set(nodes.map(node => node.getAttribute("cy")));
+			const zoomPercent = parseInt(
+				scratch.querySelector(".graph-zoom-indicator")!.textContent!,
+				10
+			);
+
+			expect(nodes).to.have.length(1000);
+			expect(xPositions.size).to.be.greaterThan(10);
+			expect(yPositions.size).to.be.lessThan(50);
+			expect(zoomPercent).to.be.at.least(5);
+		});
+
+		it("should ask users to choose a node before rendering a large graph", async () => {
+			const updates = Array.from({ length: 201 }, (_, index) => ({
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: `signal-${index}`,
+				signalId: `signal-${index}`,
+				prevValue: index,
+				newValue: index + 1,
+				receivedAt: Date.now(),
+			}));
+
+			mockAdapter._emit("signalUpdate", updates);
+			render(<GraphVisualization />, scratch);
+
+			expect(scratch.querySelector(".graph-large-state")).to.not.be.null;
+			expect(scratch.querySelectorAll(".graph-node")).to.have.length(0);
+
+			await act(async () => {
+				(
+					scratch.querySelector(
+						".graph-large-state button"
+					) as HTMLButtonElement
+				).click();
+			});
+
+			expect(scratch.querySelectorAll(".graph-node")).to.have.length(201);
+		});
+
+		it("should search a large graph and render the selected neighborhood", async () => {
+			const isolatedUpdates = Array.from({ length: 198 }, (_, index) => ({
+				type: "update" as const,
+				signalType: "signal" as const,
+				signalName: `isolated-${index}`,
+				signalId: `isolated-${index}`,
+				prevValue: index,
+				newValue: index + 1,
+				receivedAt: Date.now(),
+			}));
+			mockAdapter._emit("signalUpdate", [
+				...isolatedUpdates,
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "selected-total",
+					signalId: "selected-total",
+					prevValue: 0,
+					newValue: 1,
+					receivedAt: Date.now(),
+					allDependencies: [
+						{ id: "upstream", name: "upstream", type: "signal" },
+					],
+				},
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "downstream",
+					signalId: "downstream",
+					prevValue: 0,
+					newValue: 1,
+					receivedAt: Date.now(),
+					allDependencies: [
+						{ id: "selected-total", name: "selected-total", type: "computed" },
+					],
+				},
+			]);
+			render(<GraphVisualization />, scratch);
+
+			const searchInput = scratch.querySelector(
+				".graph-search-input"
+			) as HTMLInputElement;
+			await act(async () => {
+				searchInput.value = "selected-total";
+				searchInput.dispatchEvent(new InputEvent("input", { bubbles: true }));
+			});
+			await act(async () => {
+				(
+					scratch.querySelector(".graph-search-result") as HTMLButtonElement
+				).click();
+			});
+
+			const names = Array.from(scratch.querySelectorAll(".graph-text")).map(
+				node => node.textContent
+			);
+			expect(names).to.have.members([
+				"upstream",
+				"selected-total",
+				"downstream",
+			]);
+			expect(
+				scratch.querySelector(".graph-focus-summary")!.textContent
+			).to.contain("Showing 3 of 201 nodes");
+		});
+
+		it("should keep a wrapped dependency layer before its dependent layer", () => {
+			initDevTools(mockAdapter);
+
+			const dependencies = Array.from({ length: 80 }, (_, index) => ({
+				id: `signal-${index}`,
+				name: `signal-${index}`,
+				type: "signal" as const,
+			}));
+			mockAdapter._emit("signalUpdate", [
+				{
+					type: "update",
+					signalType: "computed",
+					signalName: "total",
+					signalId: "computed-total",
+					prevValue: 0,
+					newValue: 1,
+					receivedAt: Date.now(),
+					allDependencies: dependencies,
+				},
+			]);
+			render(<GraphVisualization />, scratch);
+
+			const signals = Array.from(
+				scratch.querySelectorAll<SVGCircleElement>(".graph-node.signal")
+			);
+			const computed = scratch.querySelector<SVGCircleElement>(
+				".graph-node.computed"
+			)!;
+			const signalXPositions = signals.map(node =>
+				Number(node.getAttribute("cx"))
+			);
+
+			expect(new Set(signalXPositions).size).to.be.greaterThan(1);
+			expect(Math.max(...signalXPositions)).to.be.lessThan(
+				Number(computed.getAttribute("cx"))
+			);
+		});
+
+		it("should export only graph nodes and links as JSON", async () => {
+			initDevTools(mockAdapter);
+
+			const updateWithDeps = {
+				type: "update" as const,
+				signalType: "computed" as const,
+				signalName: "total",
+				signalId: "computed-total-1",
+				prevValue: 0,
+				newValue: 100,
+				receivedAt: Date.now(),
+				depth: 1,
+				allDependencies: [
+					{ id: "signal-x-1", name: "x", type: "signal" as const },
+				] as DependencyInfo[],
+			};
+			mockAdapter._emit("signalUpdate", [updateWithDeps]);
+
+			let copiedText = "";
+			const originalExecCommand = document.execCommand;
+			document.execCommand = vi.fn(command => {
+				copiedText =
+					(
+						document.body.querySelector(
+							"textarea"
+						) as HTMLTextAreaElement | null
+					)?.value ?? "";
+				return command === "copy";
+			});
+
+			try {
+				render(<GraphVisualization />, scratch);
+
+				await act(async () => {
+					(
+						scratch.querySelector(".graph-export-button") as HTMLButtonElement
+					).click();
+				});
+				const jsonExportButton = Array.from(
+					scratch.querySelectorAll(".graph-export-menu-item")
+				).find(button => button.textContent === "JSON") as HTMLButtonElement;
+				await act(async () => {
+					jsonExportButton.click();
+				});
+			} finally {
+				document.execCommand = originalExecCommand;
+			}
+
+			expect(copiedText).to.not.equal("");
+			const exported = JSON.parse(copiedText);
+			expect(Object.keys(exported).sort()).to.deep.equal(["links", "nodes"]);
+			expect(exported.nodes).to.have.length(2);
+			expect(exported.links).to.have.length(1);
+		});
+
+		it("should not duplicate nodes when dependency appears in multiple updates", () => {
+			initDevTools(mockAdapter);
+
+			// First update
+			const update1 = {
+				type: "update" as const,
+				signalType: "computed" as const,
+				signalName: "doubledA",
+				signalId: "computed-doubled-a-1",
+				prevValue: 0,
+				newValue: 10,
+				receivedAt: Date.now(),
+				depth: 1,
+				allDependencies: [
+					{ id: "signal-shared-1", name: "shared", type: "signal" as const },
+				] as DependencyInfo[],
+			};
+
+			// Second update that also depends on the same signal
+			const update2 = {
+				type: "update" as const,
+				signalType: "computed" as const,
+				signalName: "doubledB",
+				signalId: "computed-doubled-b-1",
+				prevValue: 0,
+				newValue: 20,
+				receivedAt: Date.now() + 1,
+				depth: 1,
+				allDependencies: [
+					{ id: "signal-shared-1", name: "shared", type: "signal" as const },
+				] as DependencyInfo[],
+			};
+
+			mockAdapter._emit("signalUpdate", [update1, update2]);
+
+			render(<GraphVisualization />, scratch);
+
+			// Should have exactly 3 nodes: shared, doubledA, doubledB
+			// The 'shared' signal should not be duplicated
+			const nodes = scratch.querySelectorAll(".graph-node");
+			expect(nodes.length).to.equal(3);
+
+			// Check that shared appears exactly once in the graph text
+			const nodeTexts = scratch.querySelectorAll(".graph-text");
+			const sharedCount = Array.from(nodeTexts).filter(
+				t => t.textContent === "shared"
+			).length;
+			expect(sharedCount).to.equal(1);
+		});
+	});
+});

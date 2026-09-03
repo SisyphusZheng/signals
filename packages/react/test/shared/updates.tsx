@@ -21,6 +21,15 @@ import {
 } from "react";
 import type { FunctionComponent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import {
+	beforeEach,
+	afterEach,
+	describe,
+	it,
+	expect,
+	vi,
+	MockInstance,
+} from "vitest";
 
 import {
 	act,
@@ -50,7 +59,7 @@ export function updateSignalsTests(usingTransform = false) {
 
 		render = root.render.bind(root);
 
-		getConsoleErrorSpy().resetHistory();
+		getConsoleErrorSpy().mockClear();
 	});
 
 	afterEach(async () => {
@@ -143,6 +152,26 @@ export function updateSignalsTests(usingTransform = false) {
 			text = scratch.firstChild!.firstChild!;
 			expect(text).to.be.instanceOf(HTMLDivElement);
 			expect(text.firstChild).to.have.property("data", "changed");
+		});
+
+		// #773
+		it("should not cause infinite recursion when traversing Signal props", () => {
+			const sig = signal("test");
+			const props = (sig as any).props;
+			expect(props.data).not.to.equal(sig);
+			expect(props.data.value).to.equal("test");
+			const visited = new Set<object>();
+			function traverse(obj: unknown, depth = 0): void {
+				if (depth > 100)
+					throw new Error("Possible infinite recursion detected");
+				if (obj == null || typeof obj !== "object") return;
+				if (visited.has(obj)) return;
+				visited.add(obj);
+				for (const key of Object.keys(obj as object)) {
+					traverse((obj as any)[key], depth + 1);
+				}
+			}
+			expect(() => traverse(props)).not.to.throw();
 		});
 	});
 
@@ -249,7 +278,7 @@ export function updateSignalsTests(usingTransform = false) {
 				return <p>{value}</p>;
 			}
 
-			const spy = sinon.spy();
+			const spy = vi.fn();
 			function App() {
 				spy();
 				return <Child />;
@@ -261,7 +290,7 @@ export function updateSignalsTests(usingTransform = false) {
 			await act(() => {
 				sig.value = "bar";
 			});
-			expect(spy).to.be.calledOnce;
+			expect(spy).toHaveBeenCalledOnce();
 		});
 
 		it("should update memo'ed component via signals", async () => {
@@ -523,8 +552,8 @@ export function updateSignalsTests(usingTransform = false) {
 		it("should minimize rerenders when passing signals through context", async () => {
 			function spyOn<P = { children?: React.ReactNode }>(
 				c: FunctionComponent<P>
-			) {
-				return sinon.spy(c);
+			): FunctionComponent<P> & MockInstance<FunctionComponent<P>> {
+				return vi.fn(c);
 			}
 
 			// Manually read signal value below so we can watch whether components rerender
@@ -609,26 +638,26 @@ export function updateSignalsTests(usingTransform = false) {
 
 			const url = scratch.querySelector("p")!;
 			expect(url.textContent).to.equal("https://domain.com/test?a=1");
-			expect(URLModelProvider).to.be.calledOnce;
-			expect(Origin).to.be.calledOnce;
-			expect(Pathname).to.be.calledOnce;
-			expect(Search).to.be.calledOnce;
+			expect(URLModelProvider).toHaveBeenCalledOnce();
+			expect(Origin).toHaveBeenCalledOnce();
+			expect(Pathname).toHaveBeenCalledOnce();
+			expect(Search).toHaveBeenCalledOnce();
 
 			await act(() => {
 				scratch.querySelector("button")!.click();
 			});
 
 			expect(url.textContent).to.equal("https://domain.com/test?a=2");
-			expect(URLModelProvider).to.be.calledOnce;
-			expect(Origin).to.be.calledOnce;
-			expect(Pathname).to.be.calledOnce;
-			expect(Search).to.be.calledTwice;
+			expect(URLModelProvider).toHaveBeenCalledOnce();
+			expect(Origin).toHaveBeenCalledOnce();
+			expect(Pathname).toHaveBeenCalledOnce();
+			expect(Search).toHaveBeenCalledTimes(2);
 		});
 
 		it("should not subscribe to computed signals only created and not used", async () => {
 			const sig = signal(0);
-			const childSpy = sinon.spy();
-			const parentSpy = sinon.spy();
+			const childSpy = vi.fn();
+			const parentSpy = vi.fn();
 
 			function Child({ num }: { num: ReadonlySignal<number> }) {
 				childSpy();
@@ -643,21 +672,21 @@ export function updateSignalsTests(usingTransform = false) {
 
 			await render(<Parent num={sig} />);
 			expect(scratch.innerHTML).to.equal("<p>1</p>");
-			expect(parentSpy).to.be.calledOnce;
-			expect(childSpy).to.be.calledOnce;
+			expect(parentSpy).toHaveBeenCalledOnce();
+			expect(childSpy).toHaveBeenCalledOnce();
 
 			await act(() => {
 				sig.value += 1;
 			});
 			expect(scratch.innerHTML).to.equal("<p>2</p>");
-			expect(parentSpy).to.be.calledOnce;
-			expect(childSpy).to.be.calledTwice;
+			expect(parentSpy).toHaveBeenCalledOnce();
+			expect(childSpy).toHaveBeenCalledTimes(2);
 		});
 
 		it("should properly subscribe and unsubscribe to conditionally rendered computed signals ", async () => {
 			const computedDep = signal(0);
 			const renderComputed = signal(true);
-			const renderSpy = sinon.spy();
+			const renderSpy = vi.fn();
 
 			function App() {
 				renderSpy();
@@ -667,25 +696,25 @@ export function updateSignalsTests(usingTransform = false) {
 
 			await render(<App />);
 			expect(scratch.innerHTML).to.equal("<p>1</p>");
-			expect(renderSpy).to.be.calledOnce;
+			expect(renderSpy).toHaveBeenCalledOnce();
 
 			await act(() => {
 				computedDep.value += 1;
 			});
 			expect(scratch.innerHTML).to.equal("<p>2</p>");
-			expect(renderSpy).to.be.calledTwice;
+			expect(renderSpy).toHaveBeenCalledTimes(2);
 
 			await act(() => {
 				renderComputed.value = false;
 			});
 			expect(scratch.innerHTML).to.equal("");
-			expect(renderSpy).to.be.calledThrice;
+			expect(renderSpy).toHaveBeenCalledTimes(3);
 
 			await act(() => {
 				computedDep.value += 1;
 			});
 			expect(scratch.innerHTML).to.equal("");
-			expect(renderSpy).to.be.calledThrice; // Should not be called again
+			expect(renderSpy).toHaveBeenCalledTimes(3); // Should not be called again
 		});
 	});
 
@@ -715,7 +744,7 @@ export function updateSignalsTests(usingTransform = false) {
 		it("should be invoked after commit", async () => {
 			const ref = createRef<HTMLDivElement>();
 			const sig = signal("foo");
-			const spy = sinon.spy();
+			const spy = vi.fn();
 			let count = 0;
 
 			function App() {
@@ -736,13 +765,10 @@ export function updateSignalsTests(usingTransform = false) {
 			await render(<App />);
 			expect(scratch.textContent).to.equal("foo");
 
-			expect(spy).to.have.been.calledOnceWith(
-				"foo",
-				scratch.firstElementChild,
-				"0"
-			);
+			expect(spy).toHaveBeenCalledOnce();
+			expect(spy).toHaveBeenCalledWith("foo", scratch.firstElementChild, "0");
 
-			spy.resetHistory();
+			spy.mockClear();
 
 			await act(() => {
 				sig.value = "bar";
@@ -757,7 +783,8 @@ export function updateSignalsTests(usingTransform = false) {
 			// when it coincides with a render? In React 16 when running in production
 			// however, we do see "1" as expected, likely because we are using a fake
 			// act() implementation which completes after the DOM has been updated.
-			expect(spy).to.have.been.calledOnceWith(
+			expect(spy).toHaveBeenCalledOnce();
+			expect(spy).toHaveBeenCalledWith(
 				"bar",
 				scratch.firstElementChild,
 				isReact16 && isProd ? "1" : "0" // ideally always "1" - update if we find a nice way to do so!
@@ -767,8 +794,8 @@ export function updateSignalsTests(usingTransform = false) {
 		it("should invoke any returned cleanup function for updates", async () => {
 			const ref = createRef<HTMLDivElement>();
 			const sig = signal("foo");
-			const spy = sinon.spy();
-			const cleanup = sinon.spy();
+			const spy = vi.fn();
+			const cleanup = vi.fn();
 			let count = 0;
 
 			function App() {
@@ -787,13 +814,10 @@ export function updateSignalsTests(usingTransform = false) {
 
 			await render(<App />);
 
-			expect(cleanup).not.to.have.been.called;
-			expect(spy).to.have.been.calledOnceWith(
-				"foo",
-				scratch.firstElementChild,
-				"0"
-			);
-			spy.resetHistory();
+			expect(cleanup).not.toHaveBeenCalled();
+			expect(spy).toHaveBeenCalledOnce();
+			expect(spy).toHaveBeenCalledWith("foo", scratch.firstElementChild, "0");
+			spy.mockClear();
 
 			await act(() => {
 				sig.value = "bar";
@@ -803,9 +827,11 @@ export function updateSignalsTests(usingTransform = false) {
 
 			const child = scratch.firstElementChild;
 
-			expect(cleanup).to.have.been.calledOnceWith("foo", child, "0");
+			expect(cleanup).toHaveBeenCalledOnce();
+			expect(cleanup).toHaveBeenCalledWith("foo", child, "0");
 
-			expect(spy).to.have.been.calledOnceWith(
+			expect(spy).toHaveBeenCalledOnce();
+			expect(spy).toHaveBeenCalledWith(
 				"bar",
 				child,
 				isReact16 && isProd ? "1" : "0" // ideally always "1" - update if we find a nice way to do so!
@@ -815,8 +841,8 @@ export function updateSignalsTests(usingTransform = false) {
 		it("should invoke any returned cleanup function for unmounts", async () => {
 			const ref = createRef<HTMLDivElement>();
 			const sig = signal("foo");
-			const spy = sinon.spy();
-			const cleanup = sinon.spy();
+			const spy = vi.fn();
+			const cleanup = vi.fn();
 
 			function App() {
 				useSignalEffect(() => {
@@ -832,20 +858,21 @@ export function updateSignalsTests(usingTransform = false) {
 			const child = scratch.firstElementChild;
 
 			expect(scratch.innerHTML).to.equal("<p>foo</p>");
-			expect(cleanup).not.to.have.been.called;
-			expect(spy).to.have.been.calledOnceWith("foo", child);
-			spy.resetHistory();
+			expect(cleanup).not.toHaveBeenCalled();
+			expect(spy).toHaveBeenCalledOnce();
+			expect(spy).toHaveBeenCalledWith("foo", child);
+			spy.mockClear();
 
 			await act(() => {
 				root.unmount();
 			});
 
 			expect(scratch.innerHTML).to.equal("");
-			expect(spy).not.to.have.been.called;
-			expect(cleanup).to.have.been.calledOnce;
+			expect(spy).not.toHaveBeenCalled();
+			expect(cleanup).toHaveBeenCalledOnce();
 			// @note: React v18 cleans up the ref eagerly, so it's already null by the
 			// time the callback runs. this is probably worth fixing at some point.
-			expect(cleanup).to.have.been.calledWith("foo", isReact16 ? child : null);
+			expect(cleanup).toHaveBeenCalledWith("foo", isReact16 ? child : null);
 		});
 	});
 }

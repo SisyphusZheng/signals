@@ -7,7 +7,7 @@ import {
 	template,
 } from "@babel/core";
 import { isModule, addNamed } from "@babel/helper-module-imports";
-import type { Scope, VisitNodeObject } from "@babel/traverse";
+import type { VisitNodeObject } from "@babel/traverse";
 import debug from "debug";
 
 interface PluginArgs {
@@ -24,6 +24,8 @@ const getHookIdentifier = "getHookIdentifier";
 const maybeUsesSignal = "maybeUsesSignal";
 const containsJSX = "containsJSX";
 const alreadyTransformed = "alreadyTransformed";
+const jsxIdentifiers = "jsxIdentifiers";
+const jsxObjects = "jsxObjects";
 
 const UNMANAGED = "0";
 const MANAGED_COMPONENT = "1";
@@ -34,6 +36,8 @@ type HookUsage =
 	| typeof MANAGED_HOOK;
 
 const logger = {
+	verbose: debug("signals:react-transform:verbose"),
+	fnSearch: debug("signals:react-transform:fn-search"),
 	transformed: debug("signals:react-transform:transformed"),
 	skipped: debug("signals:react-transform:skipped"),
 };
@@ -43,57 +47,75 @@ const get = (pass: PluginPass, name: any) =>
 const set = (pass: PluginPass, name: string, v: any) =>
 	pass.set(`${dataNamespace}/${name}`, v);
 
-interface DataContainer {
-	getData(name: string): any;
-	setData(name: string, value: any): void;
-}
-const setData = (node: DataContainer, name: string, value: any) =>
+const setNodeData = (node: NodePath<unknown>, name: string, value: any) =>
 	node.setData(`${dataNamespace}/${name}`, value);
-const getData = (node: DataContainer, name: string) =>
+const getNodeData = (node: NodePath<unknown>, name: string) =>
 	node.getData(`${dataNamespace}/${name}`);
 
-function getComponentFunctionDeclaration(
+/**
+ * Returns the containing component or hook function path. Examples:
+ * ```
+ * function App() {               <- returns this path
+ *   <div>{signal.value}</div>    <- starting from this
+ * }
+ *
+ * function useCustomHook() {     <- returns this path
+ *   <div>{signal.value}</div>    <- starting from this
+ * }
+ * ```
+ *
+ * It will return `null` if the function is passed as a parameter
+ * to a custom hook function. Example:
+ * ```
+ * function Component() {
+ *   useCustomHook(() => {
+ *     <div>{signal.value}</div>    <- returns null
+ *   });
+ * }
+ * ```
+ */
+function findParentComponentOrHook(
 	path: NodePath,
-	filename: string | undefined,
-	prev?: Scope
-): Scope | null {
-	const functionScope = path.scope.getFunctionParent();
-
-	if (functionScope) {
-		const parent = functionScope.path.parent;
-		let functionName = getFunctionName(functionScope.path as any);
-		if (functionName === DefaultExportSymbol) {
-			functionName = filename || null;
-		}
-		if (isComponentFunction(functionScope.path as any, functionName)) {
-			return functionScope;
-		} else if (
-			parent.type === "CallExpression" &&
-			parent.callee.type === "Identifier" &&
-			parent.callee.name.startsWith("use") &&
-			parent.callee.name[3] === parent.callee.name[3].toUpperCase()
-		) {
-			return null;
-		}
-		return getComponentFunctionDeclaration(
-			functionScope.parent.path,
-			filename,
-			functionScope
-		);
-	} else {
-		return prev || null;
+	filename: string | undefined
+): NodePath<FunctionLike> | null {
+	const parentFunctionScope = path.scope.getFunctionParent();
+	if (!parentFunctionScope) {
+		logger.fnSearch("No higher function scope found in %s", filename);
+		return null;
 	}
+
+	const parentFunctionPath = parentFunctionScope.path as NodePath<FunctionLike>;
+	const fnName = getFunctionName(parentFunctionPath, filename);
+	logger.fnSearch('Checking parent function "%s" in %s', fnName, filename);
+
+	if (isComponentName(fnName) || isCustomHookName(fnName)) {
+		logger.fnSearch('Found parent function "%s" in %s', fnName, filename);
+		return parentFunctionPath;
+	} else if (isCustomHookCallback(parentFunctionPath)) {
+		logger.fnSearch('Function "%s" is a hook callback arg, stopping', fnName);
+		return null;
+	} else if (!parentFunctionPath.parentPath) {
+		logger.fnSearch('Function "%s" has no parent, stopping', fnName, filename);
+		return null;
+	}
+
+	return findParentComponentOrHook(parentFunctionPath.parentPath, filename);
 }
 
-function setOnFunctionScope(
+function setOnParentComponentOrHook(
 	path: NodePath,
 	key: string,
 	value: any,
 	filename: string | undefined
 ) {
-	const functionScope = getComponentFunctionDeclaration(path, filename);
-	if (functionScope) {
-		setData(functionScope, key, value);
+	const parentFn = findParentComponentOrHook(path, filename);
+	if (parentFn) {
+		if (logger.verbose.enabled) {
+			const fnName = getFunctionName(parentFn, filename);
+			logger.verbose(`Setting "${key}" on "${fnName}" to "${value}"`);
+		}
+
+		setNodeData(parentFn, key, value);
 	}
 }
 
@@ -200,14 +222,22 @@ function getFunctionNameFromParent(
 
 /* Determine the name of a function */
 function getFunctionName(
-	path: NodePath<FunctionLike>
-): string | typeof DefaultExportSymbol | null {
-	let nodeName = getFunctionNodeName(path.node);
-	if (nodeName) {
-		return nodeName;
+	path: NodePath<FunctionLike>,
+	filename: string | undefined
+): string | null {
+	let fnName: string | null = getFunctionNodeName(path.node);
+	if (fnName) {
+		return fnName;
 	}
 
-	return getFunctionNameFromParent(path.parentPath);
+	const nameFromParent = getFunctionNameFromParent(path.parentPath);
+	if (nameFromParent === DefaultExportSymbol) {
+		fnName = basename(filename) ?? null;
+	} else {
+		fnName = nameFromParent;
+	}
+
+	return fnName;
 }
 
 function isComponentName(name: string | null): boolean {
@@ -215,6 +245,16 @@ function isComponentName(name: string | null): boolean {
 }
 function isCustomHookName(name: string | null): boolean {
 	return name?.match(/^use[A-Z]/) != null;
+}
+
+/** Returns if the given function path is a parameter passed to a custom hook function */
+function isCustomHookCallback(path: NodePath<FunctionLike>): boolean {
+	const parent = path.parent;
+	return (
+		parent.type === "CallExpression" &&
+		parent.callee.type === "Identifier" &&
+		isCustomHookName(parent.callee.name)
+	);
 }
 
 function hasLeadingComment(path: NodePath, comment: RegExp): boolean {
@@ -284,21 +324,23 @@ function isOptedOutOfSignalTracking(path: NodePath | null): boolean {
 	}
 }
 
-function isComponentFunction(
-	path: NodePath<FunctionLike>,
-	functionName: string | null
-): boolean {
-	return (
-		getData(path.scope, containsJSX) === true && // Function contains JSX
-		isComponentName(functionName) // Function name indicates it's a component
-	);
-}
-
 function shouldTransform(
 	path: NodePath<FunctionLike>,
 	functionName: string | null,
 	options: PluginOptions
 ): boolean {
+	// This function should only be called after a function's body has been parsed
+	// and containsJSX and maybeUsesSignal could be set
+	function isComponentFunction(
+		path: NodePath<FunctionLike>,
+		functionName: string | null
+	): boolean {
+		return (
+			getNodeData(path, containsJSX) === true && // Function contains JSX
+			isComponentName(functionName) // Function name indicates it's a component
+		);
+	}
+
 	// Opt-out takes first precedence
 	if (isOptedOutOfSignalTracking(path)) return false;
 	// Opt-in opts in to transformation regardless of mode
@@ -310,7 +352,7 @@ function shouldTransform(
 
 	if (options.mode == null || options.mode === "auto") {
 		return (
-			getData(path.scope, maybeUsesSignal) === true && // Function appears to use signals;
+			getNodeData(path, maybeUsesSignal) === true && // Function appears to use signals;
 			(isComponentFunction(path, functionName) ||
 				isCustomHookName(functionName))
 		);
@@ -330,7 +372,253 @@ function isValueMemberExpression(
 	);
 }
 
-const tryCatchTemplate = template.statements`var STORE_IDENTIFIER = HOOK_IDENTIFIER(HOOK_USAGE);
+function isJSXAlternativeCall(
+	path: NodePath<BabelTypes.CallExpression>,
+	state: PluginPass
+): boolean {
+	const jsxIdentifierSet = get(state, jsxIdentifiers) as Set<string>;
+	const jsxObjectMap = get(state, jsxObjects) as Map<string, string[]>;
+	const callee = path.get("callee");
+
+	// Check direct function calls like _jsx("div", props) or createElement("div", props)
+	if (callee.isIdentifier()) {
+		return jsxIdentifierSet?.has(callee.node.name) ?? false;
+	}
+
+	// Check member expression calls like React.createElement("div", props) or jsxRuntime.jsx("div", props)
+	if (callee.isMemberExpression()) {
+		const object = callee.get("object");
+		const property = callee.get("property");
+
+		if (object.isIdentifier() && property.isIdentifier()) {
+			const objectName = object.node.name;
+			const methodName = property.node.name;
+			const allowedMethods = jsxObjectMap?.get(objectName);
+			return allowedMethods?.includes(methodName) ?? false;
+		}
+	}
+
+	return false;
+}
+
+function isSignalCall(path: NodePath<BabelTypes.CallExpression>): boolean {
+	const callee = path.get("callee");
+
+	// Check direct calls to APIs that accept debug names.
+	if (callee.isIdentifier()) {
+		const name = callee.node.name;
+		return (
+			name === "signal" ||
+			name === "computed" ||
+			name === "effect" ||
+			name === "useSignal" ||
+			name === "useComputed" ||
+			name === "useSignalEffect"
+		);
+	}
+
+	return false;
+}
+
+function getStaticName(node: BabelTypes.Node, computed = false): string | null {
+	if (!computed && node.type === "Identifier") {
+		return node.name;
+	} else if (!computed && node.type === "PrivateName") {
+		return `#${node.id.name}`;
+	} else if (node.type === "StringLiteral" || node.type === "NumericLiteral") {
+		return String(node.value);
+	}
+
+	return null;
+}
+
+function hasComputedKey(node: BabelTypes.Node): boolean {
+	return "computed" in node && node.computed === true;
+}
+
+function getAssignmentName(
+	node: BabelTypes.AssignmentExpression["left"]
+): string | null {
+	if (node.type === "Identifier") {
+		return node.name;
+	} else if (node.type === "MemberExpression") {
+		return getStaticName(node.property, node.computed);
+	}
+
+	return null;
+}
+
+function getFunctionExpressionName(path: NodePath): string | null {
+	const parentPath = path.parentPath;
+	if (!parentPath) return null;
+
+	if (parentPath.isVariableDeclarator()) {
+		return parentPath.node.id.type === "Identifier"
+			? parentPath.node.id.name
+			: null;
+	} else if (parentPath.isAssignmentExpression()) {
+		return getAssignmentName(parentPath.node.left);
+	} else if (
+		parentPath.isObjectProperty() ||
+		parentPath.isClassProperty() ||
+		parentPath.isClassPrivateProperty()
+	) {
+		return getStaticName(parentPath.node.key, hasComputedKey(parentPath.node));
+	}
+
+	return null;
+}
+
+function getSignalNameFromContext(
+	path: NodePath<BabelTypes.CallExpression>
+): string | null {
+	let currentPath: NodePath | null = path.parentPath;
+	while (currentPath) {
+		if (
+			currentPath.isArrowFunctionExpression() ||
+			(currentPath.isFunctionExpression() && !currentPath.node.id)
+		) {
+			const name = getFunctionExpressionName(currentPath);
+			if (name) return name;
+			break;
+		} else if (
+			currentPath.isVariableDeclarator() &&
+			currentPath.node.id.type === "Identifier"
+		) {
+			return currentPath.node.id.name;
+		} else if (currentPath.isAssignmentExpression()) {
+			const name = getAssignmentName(currentPath.node.left);
+			if (name) return name;
+			break;
+		} else if (currentPath.isObjectProperty()) {
+			const name = getStaticName(
+				currentPath.node.key,
+				hasComputedKey(currentPath.node)
+			);
+			if (name) return name;
+			break;
+		} else if (
+			currentPath.isClassProperty() ||
+			currentPath.isClassPrivateProperty()
+		) {
+			const name = getStaticName(
+				currentPath.node.key,
+				hasComputedKey(currentPath.node)
+			);
+			if (name) return name;
+			break;
+		} else if (
+			(currentPath.isFunctionDeclaration() ||
+				currentPath.isFunctionExpression()) &&
+			currentPath.node.id
+		) {
+			return currentPath.node.id.name;
+		} else if (
+			currentPath.isObjectMethod() ||
+			currentPath.isClassMethod() ||
+			currentPath.isClassPrivateMethod()
+		) {
+			const name = getStaticName(
+				currentPath.node.key,
+				hasComputedKey(currentPath.node)
+			);
+			if (name) return name;
+			break;
+		}
+		currentPath = currentPath.parentPath;
+	}
+
+	return null;
+}
+
+function getSignalName(
+	path: NodePath<BabelTypes.CallExpression>,
+	filename: string | undefined
+): string | null {
+	const contextName = getSignalNameFromContext(path);
+	const baseName = basename(filename);
+	const lineNumber = path.node.loc?.start.line;
+
+	if (baseName && lineNumber) {
+		return contextName
+			? `${contextName} (${baseName}:${lineNumber})`
+			: `${baseName}:${lineNumber}`;
+	}
+
+	return contextName;
+}
+
+function shouldSkipNameInjection(
+	t: typeof BabelTypes,
+	args: NodePath<
+		| BabelTypes.Expression
+		| BabelTypes.SpreadElement
+		| BabelTypes.JSXNamespacedName
+		| BabelTypes.ArgumentPlaceholder
+	>[]
+): boolean {
+	if (args.length < 2) return false;
+
+	const optionsArg = args[1];
+	if (!optionsArg.isObjectExpression()) {
+		// Non-literal options cannot be safely extended without changing semantics.
+		return true;
+	}
+
+	return optionsArg.node.properties.some(prop => {
+		if (t.isSpreadElement(prop)) return true;
+		if (!t.isObjectProperty(prop)) return false;
+
+		const key = getStaticName(prop.key, prop.computed);
+		return key === "name" || (key === null && prop.computed);
+	});
+}
+
+function injectSignalName(
+	t: typeof BabelTypes,
+	path: NodePath<BabelTypes.CallExpression>,
+	nameValue: string
+): void {
+	const args = path.get("arguments");
+	const name = t.stringLiteral(nameValue);
+
+	if (args.length === 0) {
+		// No arguments, add both value and options
+		const nameOption = t.objectExpression([
+			t.objectProperty(t.identifier("name"), name),
+		]);
+		path.node.arguments.push(t.identifier("undefined"), nameOption);
+	} else if (args.length === 1) {
+		// One argument (value), add options object
+		const nameOption = t.objectExpression([
+			t.objectProperty(t.identifier("name"), name),
+		]);
+		path.node.arguments.push(nameOption);
+	} else if (args.length >= 2) {
+		// Two or more arguments, modify existing literal options
+		const optionsArg = args[1];
+		if (optionsArg.isObjectExpression()) {
+			optionsArg.node.properties.push(
+				t.objectProperty(t.identifier("name"), name)
+			);
+		}
+	}
+}
+
+function hasValuePropertyInPattern(pattern: BabelTypes.ObjectPattern): boolean {
+	for (const property of pattern.properties) {
+		if (BabelTypes.isObjectProperty(property)) {
+			const key = property.key;
+
+			if (BabelTypes.isIdentifier(key, { name: "value" })) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+const tryCatchTemplate = template.statements`var STORE_IDENTIFIER = HOOK_CALL;
 try {
 	BODY
 } finally {
@@ -341,30 +629,47 @@ function wrapInTryFinally(
 	t: typeof BabelTypes,
 	path: NodePath<FunctionLike>,
 	state: PluginPass,
-	hookUsage: HookUsage
+	hookUsage: HookUsage,
+	options: PluginOptions,
+	functionName: string | null
 ): BabelTypes.BlockStatement {
 	const stopTrackingIdentifier = path.scope.generateUidIdentifier("effect");
 
-	return t.blockStatement(
-		tryCatchTemplate({
-			STORE_IDENTIFIER: stopTrackingIdentifier,
-			HOOK_IDENTIFIER: get(state, getHookIdentifier)(),
-			HOOK_USAGE: hookUsage,
-			BODY: t.isBlockStatement(path.node.body)
-				? path.node.body.body // TODO: Is it okay to elide the block statement here?
-				: t.returnStatement(path.node.body),
-		})
-	);
+	// Build the useSignals call with optional component name
+	const args: BabelTypes.Expression[] = [t.numericLiteral(parseInt(hookUsage))];
+	if (options.experimental?.debug && functionName) {
+		args.push(t.stringLiteral(functionName));
+	}
+	const hookCall = t.callExpression(get(state, getHookIdentifier)(), args);
+
+	const statements = tryCatchTemplate({
+		STORE_IDENTIFIER: stopTrackingIdentifier,
+		HOOK_CALL: hookCall,
+		BODY: t.isBlockStatement(path.node.body)
+			? path.node.body.body
+			: t.returnStatement(path.node.body),
+	});
+	return t.blockStatement(statements);
 }
 
 function prependUseSignals<T extends FunctionLike>(
 	t: typeof BabelTypes,
 	path: NodePath<T>,
-	state: PluginPass
+	state: PluginPass,
+	options: PluginOptions,
+	functionName: string | null
 ): BabelTypes.BlockStatement {
+	const args: BabelTypes.Expression[] = [];
+	if (options.experimental?.debug && functionName) {
+		// useSignals(usage, componentName)
+		// When debug is enabled, we need to pass undefined for usage and the component name
+		args.push(t.identifier("undefined"));
+		args.push(t.stringLiteral(functionName));
+	}
+
 	const body = t.blockStatement([
 		t.expressionStatement(
-			t.callExpression(get(state, getHookIdentifier)(), [])
+			t.callExpression(get(state, getHookIdentifier)(), args)
 		),
 	]);
 	if (t.isBlockStatement(path.node.body)) {
@@ -389,19 +694,26 @@ function transformFunction(
 	const hookUsage = options.experimental?.noTryFinally
 		? UNMANAGED
 		: isHook
-		? MANAGED_HOOK
-		: isComponent
-		? MANAGED_COMPONENT
-		: UNMANAGED;
+			? MANAGED_HOOK
+			: isComponent
+				? MANAGED_COMPONENT
+				: UNMANAGED;
 
 	let newBody: BabelTypes.BlockStatement;
 	if (hookUsage !== UNMANAGED) {
-		newBody = wrapInTryFinally(t, path, state, hookUsage);
+		newBody = wrapInTryFinally(
+			t,
+			path,
+			state,
+			hookUsage,
+			options,
+			functionName
+		);
 	} else {
-		newBody = prependUseSignals(t, path, state);
+		newBody = prependUseSignals(t, path, state, options, functionName);
 	}
 
-	setData(path, alreadyTransformed, true);
+	setNodeData(path, alreadyTransformed, true);
 	path.get("body").replaceWith(newBody);
 }
 
@@ -465,6 +777,92 @@ function createImportLazily(
 	};
 }
 
+function detectJSXAlternativeImports(
+	path: NodePath<BabelTypes.Program>,
+	state: PluginPass
+) {
+	const jsxIdentifierSet = new Set<string>();
+	const jsxObjectMap = new Map<string, string[]>();
+
+	const jsxPackages = {
+		"react/jsx-runtime": ["jsx", "jsxs"],
+		"react/jsx-dev-runtime": ["jsxDEV"],
+		react: ["createElement"],
+	};
+
+	path.traverse({
+		ImportDeclaration(importPath) {
+			const packageName = importPath.node.source.value;
+			const jsxMethods = jsxPackages[packageName as keyof typeof jsxPackages];
+
+			if (!jsxMethods) {
+				return;
+			}
+
+			for (const specifier of importPath.node.specifiers) {
+				if (
+					specifier.type === "ImportSpecifier" &&
+					specifier.imported.type === "Identifier"
+				) {
+					// Check if this is a function we care about
+					if (jsxMethods.includes(specifier.imported.name)) {
+						jsxIdentifierSet.add(specifier.local.name);
+					}
+				} else if (specifier.type === "ImportDefaultSpecifier") {
+					// Handle default imports - add to objects map for member access
+					jsxObjectMap.set(specifier.local.name, jsxMethods);
+				}
+			}
+		},
+		VariableDeclarator(varPath) {
+			const init = varPath.get("init");
+
+			if (init.isCallExpression()) {
+				const callee = init.get("callee");
+				const args = init.get("arguments");
+
+				if (
+					callee.isIdentifier() &&
+					callee.node.type === "Identifier" &&
+					callee.node.name === "require" &&
+					args.length > 0 &&
+					args[0].isStringLiteral()
+				) {
+					const packageName = args[0].node.value;
+					const jsxMethods =
+						jsxPackages[packageName as keyof typeof jsxPackages];
+
+					if (jsxMethods) {
+						if (varPath.node.id.type === "Identifier") {
+							// Handle CJS require like: const React = require("react")
+							jsxObjectMap.set(varPath.node.id.name, jsxMethods);
+						} else if (varPath.node.id.type === "ObjectPattern") {
+							// Handle destructured CJS require like: const { createElement } = require("react")
+							for (const prop of varPath.node.id.properties) {
+								if (
+									prop.type === "ObjectProperty" &&
+									prop.key.type === "Identifier" &&
+									prop.value.type === "Identifier" &&
+									jsxMethods.includes(prop.key.name)
+								) {
+									jsxIdentifierSet.add(prop.value.name);
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+	});
+
+	logger.verbose("Using JSX alternatives: %o", {
+		identifiers: Array.from(jsxIdentifierSet),
+		objects: Array.from(jsxObjectMap.entries()),
+	});
+	set(state, jsxIdentifiers, jsxIdentifierSet);
+	set(state, jsxObjects, jsxObjectMap);
+}
+
 export interface PluginOptions {
 	/**
 	 * Specify the mode to use:
@@ -475,7 +873,24 @@ export interface PluginOptions {
 	mode?: "auto" | "manual" | "all";
 	/** Specify a custom package to import the `useSignals` hook from. */
 	importSource?: string;
+	/**
+	 * Detect JSX elements created using alternative methods like jsx-runtime or createElement calls.
+	 * When enabled, detects patterns from react/jsx-runtime and react packages.
+	 * @default false
+	 */
+	detectTransformedJSX?: boolean;
 	experimental?: {
+		/**
+		 * If set to true the plugin will inject names into all invocations of
+		 *
+		 * - computed/useComputed
+		 * - signal/useSignal
+		 *
+		 * these names hook into @preact/signals-debug.
+		 *
+		 * @default false
+		 */
+		debug?: boolean;
 		/**
 		 * If set to true, the component body will not be wrapped in a try/finally
 		 * block and instead the next component render or a microtick will stop
@@ -509,17 +924,10 @@ function log(
 		logger.transformed(`${functionName} (${relativePath}:${lineNum})`);
 	} else {
 		logger.skipped(`${functionName} (${relativePath}:${lineNum}) %o`, {
-			hasSignals: getData(path.scope, maybeUsesSignal) ?? false,
-			hasJSX: getData(path.scope, containsJSX) ?? false,
+			hasSignals: getNodeData(path, maybeUsesSignal) ?? false,
+			hasJSX: getNodeData(path, containsJSX) ?? false,
 		});
 	}
-}
-
-function isComponentLike(
-	path: NodePath<FunctionLike>,
-	functionName: string | null
-): boolean {
-	return !getData(path, alreadyTransformed) && isComponentName(functionName);
 }
 
 export default function signalsTransform(
@@ -533,17 +941,15 @@ export default function signalsTransform(
 	// babel pass with plugins on components twice.
 	const visitFunction: VisitNodeObject<PluginPass, FunctionLike> = {
 		exit(path, state) {
-			if (getData(path, alreadyTransformed) === true) return false;
+			if (getNodeData(path, alreadyTransformed) === true) return false;
 
-			let functionName = getFunctionName(path);
-			if (functionName === DefaultExportSymbol) {
-				functionName = basename(this.filename) ?? null;
-			}
-
+			const functionName = getFunctionName(path, this.filename);
+			const isComponentLike =
+				!getNodeData(path, alreadyTransformed) && isComponentName(functionName);
 			if (shouldTransform(path, functionName, state.opts)) {
 				transformFunction(t, state.opts, path, functionName, state);
 				log(true, path, functionName, this.filename);
-			} else if (isComponentLike(path, functionName)) {
+			} else if (isComponentLike) {
 				log(false, path, functionName, this.filename);
 			}
 		},
@@ -569,6 +975,10 @@ export default function signalsTransform(
 							options.importSource ?? defaultImportSource
 						)
 					);
+
+					if (options.detectTransformedJSX) {
+						detectJSXAlternativeImports(path, state);
+					}
 				},
 			},
 
@@ -577,17 +987,52 @@ export default function signalsTransform(
 			FunctionDeclaration: visitFunction,
 			ObjectMethod: visitFunction,
 
+			CallExpression(path, state) {
+				if (options.detectTransformedJSX) {
+					if (isJSXAlternativeCall(path, state)) {
+						setOnParentComponentOrHook(path, containsJSX, true, this.filename);
+					}
+				}
+
+				// Handle signal naming
+				if (options.experimental?.debug && isSignalCall(path)) {
+					const args = path.get("arguments");
+
+					// Only inject name if it doesn't already have one
+					if (!shouldSkipNameInjection(t, args)) {
+						const signalName = getSignalName(path, this.filename);
+						if (signalName) injectSignalName(t, path, signalName);
+					}
+				}
+			},
+
 			MemberExpression(path) {
 				if (isValueMemberExpression(path)) {
-					setOnFunctionScope(path, maybeUsesSignal, true, this.filename);
+					setOnParentComponentOrHook(
+						path,
+						maybeUsesSignal,
+						true,
+						this.filename
+					);
+				}
+			},
+
+			ObjectPattern(path) {
+				if (hasValuePropertyInPattern(path.node)) {
+					setOnParentComponentOrHook(
+						path,
+						maybeUsesSignal,
+						true,
+						this.filename
+					);
 				}
 			},
 
 			JSXElement(path) {
-				setOnFunctionScope(path, containsJSX, true, this.filename);
+				setOnParentComponentOrHook(path, containsJSX, true, this.filename);
 			},
 			JSXFragment(path) {
-				setOnFunctionScope(path, containsJSX, true, this.filename);
+				setOnParentComponentOrHook(path, containsJSX, true, this.filename);
 			},
 		},
 	};

@@ -19,11 +19,19 @@ import {
 	objMethodComp,
 	variableHooks,
 } from "./helpers";
+import { it, describe, expect } from "vitest";
 
+// Guidance for Debugging Generated Tests
+// ===============================
+//
 // To help interactively debug a specific test case, add the test ids of the
 // test cases you want to debug to the `debugTestIds` array, e.g. (["258",
-// "259"]). Set to true to debug all tests.
-const DEBUG_TEST_IDS: string[] | true = [];
+// "259"]). Set to true to debug all tests. Set to false to skip all generated tests.
+//
+// The `debugger` statement in `runTestCases` will then trigger for the test case
+// specified in the DEBUG_TEST_IDS. Follow the guide at https://vitest.dev/guide/debugging for
+// instructions on debugging Vitest tests in your environment.
+const DEBUG_TEST_IDS: string[] | boolean = [];
 
 const format = (code: string) => prettier.format(code, { parser: "babel" });
 
@@ -47,7 +55,7 @@ function transformCode(
 	return result?.code || "";
 }
 
-function runTest(
+async function runTest(
 	input: string,
 	expected: string,
 	options: PluginOptions = { mode: "auto" },
@@ -55,7 +63,7 @@ function runTest(
 	cjs?: boolean
 ) {
 	const output = transformCode(input, options, filename, cjs);
-	expect(format(output)).to.equal(format(expected));
+	expect(await format(output)).to.equal(await format(expected));
 }
 
 interface TestCaseConfig {
@@ -75,43 +83,40 @@ let testCount = 0;
 const getTestId = () => (testCount++).toString().padStart(3, "0");
 
 function runTestCases(config: TestCaseConfig, testCases: GeneratedCode[]) {
-	testCases = testCases
-		.map(t => ({
-			...t,
-			input: format(t.input),
-			transformed: format(t.transformed),
-		}))
-		.sort((a, b) => (a.name < b.name ? -1 : 1));
+	testCases = testCases.sort((a, b) => (a.name < b.name ? -1 : 1));
 
 	for (const testCase of testCases) {
 		let testId = getTestId();
 
 		// Only run tests in debugTestIds
 		if (
-			Array.isArray(DEBUG_TEST_IDS) &&
-			DEBUG_TEST_IDS.length > 0 &&
-			!DEBUG_TEST_IDS.includes(testId)
+			DEBUG_TEST_IDS === false ||
+			(Array.isArray(DEBUG_TEST_IDS) &&
+				DEBUG_TEST_IDS.length > 0 &&
+				!DEBUG_TEST_IDS.includes(testId))
 		) {
 			continue;
 		}
 
-		it(`(${testId}) ${testCase.name}`, () => {
+		it(`(${testId}) ${testCase.name}`, async () => {
 			if (DEBUG_TEST_IDS === true || DEBUG_TEST_IDS.includes(testId)) {
 				console.log("input:", testCase.input.replace(/\s+/g, " ")); // eslint-disable-line no-console
 				debugger; // eslint-disable-line no-debugger
 			}
 
-			const input = testCase.input;
+			const input = await format(testCase.input);
+			const transformed = await format(testCase.transformed);
+
 			let expected = "";
 			if (config.expectTransformed) {
 				expected +=
 					'import { useSignals as _useSignals } from "@preact/signals-react/runtime";\n';
-				expected += testCase.transformed;
+				expected += transformed;
 			} else {
 				expected = input;
 			}
 
-			runTest(input, expected, config.options, config.filename);
+			await runTest(input, expected, config.options, config.filename);
 		});
 	}
 }
@@ -221,10 +226,172 @@ describe("React Signals Babel Transform", () => {
 			expectTransformed: true,
 			options: { mode: "auto" },
 		});
+
+		it("detects destructuring patterns with value property", async () => {
+			const inputCode = `
+				function MyComponent(props) {
+					const { value: signalValue } = props.signal;
+					return <div>{signalValue}</div>;
+				}
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent(props) {
+					var _effect = _useSignals(1);
+					try {
+						const { value: signalValue } = props.signal;
+						return <div>{signalValue}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput);
+		});
+
+		it("detects nested destructuring patterns with value property", async () => {
+			// Test case 1: Simple nested destructuring
+			const inputCode1 = `
+				function MyComponent(props) {
+					const { signal: { value } } = props;
+					return <div>{value}</div>;
+				}
+			`;
+
+			const expectedOutput1 = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent(props) {
+					var _effect = _useSignals(1);
+					try {
+						const { signal: { value } } = props;
+						return <div>{value}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode1, expectedOutput1);
+
+			// Test case 2: Deeply nested destructuring
+			const inputCode2 = `
+				function MyComponent(props) {
+					const { data: { signal: { value: signalValue } } } = props;
+					return <div>{signalValue}</div>;
+				}
+			`;
+
+			const expectedOutput2 = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent(props) {
+					var _effect = _useSignals(1);
+					try {
+						const { data: { signal: { value: signalValue } } } = props;
+						return <div>{signalValue}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode2, expectedOutput2);
+
+			// Test case 3: Multiple value properties at different levels
+			const inputCode3 = `
+				function MyComponent(props) {
+					const { value: outerValue, signal: { value: innerValue } } = props;
+					return <div>{outerValue} {innerValue}</div>;
+				}
+			`;
+
+			const expectedOutput3 = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent(props) {
+					var _effect = _useSignals(1);
+					try {
+						const { value: outerValue, signal: { value: innerValue } } = props;
+						return <div>{outerValue} {innerValue}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode3, expectedOutput3);
+		});
+
+		it("signal access in nested functions", async () => {
+			const inputCode = `
+				function MyComponent(props) {
+					return props.listSignal.value.map(function iteration(x) {
+						return <div>{x}</div>;
+					});
+				};
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent(props) {
+					var _effect = _useSignals(1);
+					try {
+						return props.listSignal.value.map(function iteration(x) {
+							return <div>{x}</div>;
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput);
+		});
 	});
 
 	describe("auto mode doesn't transform", () => {
-		it("useEffect callbacks that use signals", () => {
+		it("should not leak JSX detection outside of component scope", async () => {
+			const inputCode = `
+				function wrapper() {
+					function Component() {
+						return <div>Hello</div>;
+					}
+					const CountModel = createModel(() => ({
+						count: signal(0),
+						increment() {
+							this.count.value++;
+						},
+					}));
+				}
+			`;
+
+			const expectedOutput = inputCode;
+
+			await runTest(inputCode, expectedOutput);
+		});
+
+		it("should not leak JSX detection outside of non-components", async () => {
+			const inputCode = `
+				describe("suite", () => {
+					it("test 1", () => {
+						render(<Counter />);
+					});
+					it("test 2", () => {
+						const CountModel = () => signal.value;
+						function Counter() {
+							return <div>Hello2</div>;
+						}
+						render(<Counter />);
+					});
+				});
+			`;
+
+			const expectedOutput = inputCode;
+
+			await runTest(inputCode, expectedOutput);
+		});
+
+		it("useEffect callbacks that use signals", async () => {
 			const inputCode = `
 				function App() {
 					useEffect(() => {
@@ -235,7 +402,7 @@ describe("React Signals Babel Transform", () => {
 			`;
 
 			const expectedOutput = inputCode;
-			runTest(inputCode, expectedOutput);
+			await runTest(inputCode, expectedOutput);
 		});
 
 		runGeneratedTestCases({
@@ -246,7 +413,7 @@ describe("React Signals Babel Transform", () => {
 	});
 
 	describe("auto mode supports opting out of transforming", () => {
-		it("opt-out comment overrides opt-in comment", () => {
+		it("opt-out comment overrides opt-in comment", async () => {
 			const inputCode = `
 				/**
 				 * @noUseSignals
@@ -259,7 +426,7 @@ describe("React Signals Babel Transform", () => {
 
 			const expectedOutput = inputCode;
 
-			runTest(inputCode, expectedOutput, { mode: "auto" });
+			await runTest(inputCode, expectedOutput, { mode: "auto" });
 		});
 
 		runGeneratedTestCases({
@@ -280,7 +447,7 @@ describe("React Signals Babel Transform", () => {
 	});
 
 	describe("manual mode doesn't transform anything by default", () => {
-		it("useEffect callbacks that use signals", () => {
+		it("useEffect callbacks that use signals", async () => {
 			const inputCode = `
 				function App() {
 					useEffect(() => {
@@ -291,7 +458,7 @@ describe("React Signals Babel Transform", () => {
 			`;
 
 			const expectedOutput = inputCode;
-			runTest(inputCode, expectedOutput);
+			await runTest(inputCode, expectedOutput);
 		});
 
 		runGeneratedTestCases({
@@ -302,7 +469,7 @@ describe("React Signals Babel Transform", () => {
 	});
 
 	describe("manual mode opts into transforming", () => {
-		it("opt-out comment overrides opt-in comment", () => {
+		it("opt-out comment overrides opt-in comment", async () => {
 			const inputCode = `
 				/**
 				 * @noUseSignals
@@ -315,7 +482,7 @@ describe("React Signals Babel Transform", () => {
 
 			const expectedOutput = inputCode;
 
-			runTest(inputCode, expectedOutput, { mode: "auto" });
+			await runTest(inputCode, expectedOutput, { mode: "auto" });
 		});
 
 		runGeneratedTestCases({
@@ -331,7 +498,85 @@ describe("React Signals Babel Transform", () => {
 	// TODO: Figure out what to do with the following
 
 	describe("all mode transformations", () => {
-		it("skips transforming arrow function component with leading opt-out JSDoc comment before variable declaration", () => {
+		it("should not leak JSX detection outside of component scope", async () => {
+			const inputCode = `
+				function wrapper() {
+					function Component() {
+						return <div>Hello</div>;
+					}
+					const CountModel = createModel(() => ({
+						count: signal(0),
+						increment() {
+							this.count.value++;
+						},
+					}));
+				}
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function wrapper() {
+					function Component() {
+			    	var _effect = _useSignals(1);
+    				try {
+    				  return <div>Hello</div>;
+    				} finally {
+    				  _effect.f();
+    				}
+					}
+					const CountModel = createModel(() => ({
+						count: signal(0),
+						increment() {
+							this.count.value++;
+						},
+					}));
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput, { mode: "all" });
+		});
+
+		it("should not leak JSX detection outside of non-components", async () => {
+			const inputCode = `
+				describe("suite", () => {
+					it("test 1", () => {
+						render(<Counter />);
+					});
+					it("test 2", () => {
+						const CountModel = () => signal.value;
+						function Counter() {
+							return <div>Hello2</div>;
+						}
+						render(<Counter />);
+					});
+				});
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				describe("suite", () => {
+					it("test 1", () => {
+						render(<Counter />);
+					});
+					it("test 2", () => {
+						const CountModel = () => signal.value;
+						function Counter() {
+							var _effect = _useSignals(1);
+							try {
+								return <div>Hello2</div>;
+							} finally {
+								_effect.f();
+							}
+						}
+						render(<Counter />);
+					});
+				});
+			`;
+
+			await runTest(inputCode, expectedOutput, { mode: "all" });
+		});
+
+		it("skips transforming arrow function component with leading opt-out JSDoc comment before variable declaration", async () => {
 			const inputCode = `
 				/** @noUseSignals */
 				const MyComponent = () => {
@@ -341,10 +586,10 @@ describe("React Signals Babel Transform", () => {
 
 			const expectedOutput = inputCode;
 
-			runTest(inputCode, expectedOutput, { mode: "all" });
+			await runTest(inputCode, expectedOutput, { mode: "all" });
 		});
 
-		it("skips transforming function declaration components with leading opt-out JSDoc comment", () => {
+		it("skips transforming function declaration components with leading opt-out JSDoc comment", async () => {
 			const inputCode = `
 				/** @noUseSignals */
 				function MyComponent() {
@@ -354,10 +599,10 @@ describe("React Signals Babel Transform", () => {
 
 			const expectedOutput = inputCode;
 
-			runTest(inputCode, expectedOutput, { mode: "all" });
+			await runTest(inputCode, expectedOutput, { mode: "all" });
 		});
 
-		it("transforms function declaration component that doesn't use signals", () => {
+		it("transforms function declaration component that doesn't use signals", async () => {
 			const inputCode = `
 				function MyComponent() {
 					return <div>Hello World</div>;
@@ -376,10 +621,10 @@ describe("React Signals Babel Transform", () => {
 				}
 			`;
 
-			runTest(inputCode, expectedOutput, { mode: "all" });
+			await runTest(inputCode, expectedOutput, { mode: "all" });
 		});
 
-		it("transforms require syntax", () => {
+		it("transforms require syntax", async () => {
 			const inputCode = `
 			    const react = require("react");
 				function MyComponent() {
@@ -399,10 +644,16 @@ describe("React Signals Babel Transform", () => {
 					}
 				}
 			`;
-			runTest(inputCode, expectedOutput, { mode: "all" }, undefined, true);
+			await runTest(
+				inputCode,
+				expectedOutput,
+				{ mode: "all" },
+				undefined,
+				true
+			);
 		});
 
-		it("transforms arrow function component with return statement that doesn't use signals", () => {
+		it("transforms arrow function component with return statement that doesn't use signals", async () => {
 			const inputCode = `
 				const MyComponent = () => {
 					return <div>Hello World</div>;
@@ -421,10 +672,10 @@ describe("React Signals Babel Transform", () => {
 				};
 			`;
 
-			runTest(inputCode, expectedOutput, { mode: "all" });
+			await runTest(inputCode, expectedOutput, { mode: "all" });
 		});
 
-		it("transforms function declaration component that uses signals", () => {
+		it("transforms function declaration component that uses signals", async () => {
 			const inputCode = `
 				function MyComponent() {
 					signal.value;
@@ -445,10 +696,10 @@ describe("React Signals Babel Transform", () => {
 				}
 			`;
 
-			runTest(inputCode, expectedOutput, { mode: "all" });
+			await runTest(inputCode, expectedOutput, { mode: "all" });
 		});
 
-		it("transforms arrow function component with return statement that uses signals", () => {
+		it("transforms arrow function component with return statement that uses signals", async () => {
 			const inputCode = `
 				const MyComponent = () => {
 					signal.value;
@@ -469,12 +720,12 @@ describe("React Signals Babel Transform", () => {
 				};
 			`;
 
-			runTest(inputCode, expectedOutput, { mode: "all" });
+			await runTest(inputCode, expectedOutput, { mode: "all" });
 		});
 	});
 
 	describe("noTryFinally option", () => {
-		it("prepends arrow function component with useSignals call", () => {
+		it("prepends arrow function component with useSignals call", async () => {
 			const inputCode = `
 				const MyComponent = () => {
 					signal.value;
@@ -491,12 +742,12 @@ describe("React Signals Babel Transform", () => {
 				};
 			`;
 
-			runTest(inputCode, expectedOutput, {
+			await runTest(inputCode, expectedOutput, {
 				experimental: { noTryFinally: true },
 			});
 		});
 
-		it("prepends arrow function component with useSignals call", () => {
+		it("prepends arrow function component with useSignals call", async () => {
 			const inputCode = `
 				const MyComponent = () => <div>{name.value}</div>;
 			`;
@@ -509,12 +760,12 @@ describe("React Signals Babel Transform", () => {
 				};
 			`;
 
-			runTest(inputCode, expectedOutput, {
+			await runTest(inputCode, expectedOutput, {
 				experimental: { noTryFinally: true },
 			});
 		});
 
-		it("prepends function declaration components with useSignals call", () => {
+		it("prepends function declaration components with useSignals call", async () => {
 			const inputCode = `
 				function MyComponent() {
 					signal.value;
@@ -531,12 +782,12 @@ describe("React Signals Babel Transform", () => {
 				}
 			`;
 
-			runTest(inputCode, expectedOutput, {
+			await runTest(inputCode, expectedOutput, {
 				experimental: { noTryFinally: true },
 			});
 		});
 
-		it("prepends function expression components with useSignals call", () => {
+		it("prepends function expression components with useSignals call", async () => {
 			const inputCode = `
 				const MyComponent = function () {
 					signal.value;
@@ -553,12 +804,12 @@ describe("React Signals Babel Transform", () => {
 				};
 			`;
 
-			runTest(inputCode, expectedOutput, {
+			await runTest(inputCode, expectedOutput, {
 				experimental: { noTryFinally: true },
 			});
 		});
 
-		it("prepends custom hook function declarations with useSignals call", () => {
+		it("prepends custom hook function declarations with useSignals call", async () => {
 			const inputCode = `
 				function useCustomHook() {
 					signal.value;
@@ -575,12 +826,12 @@ describe("React Signals Babel Transform", () => {
 				}
 			`;
 
-			runTest(inputCode, expectedOutput, {
+			await runTest(inputCode, expectedOutput, {
 				experimental: { noTryFinally: true },
 			});
 		});
 
-		it("recursively propogates `.value` reads to parent component", () => {
+		it("recursively propogates `.value` reads to parent component", async () => {
 			const inputCode = `
 				function MyComponent() {
 					return <div>{new Array(20).fill(null).map(() => signal.value)}</div>;
@@ -595,14 +846,14 @@ describe("React Signals Babel Transform", () => {
 				}
 			`;
 
-			runTest(inputCode, expectedOutput, {
+			await runTest(inputCode, expectedOutput, {
 				experimental: { noTryFinally: true },
 			});
 		});
 	});
 
 	describe("importSource option", () => {
-		it("imports useSignals from custom source", () => {
+		it("imports useSignals from custom source", async () => {
 			const inputCode = `
 				const MyComponent = () => {
 					signal.value;
@@ -623,7 +874,9 @@ describe("React Signals Babel Transform", () => {
 				};
 			`;
 
-			runTest(inputCode, expectedOutput, { importSource: "custom-source" });
+			await runTest(inputCode, expectedOutput, {
+				importSource: "custom-source",
+			});
 		});
 	});
 
@@ -651,7 +904,7 @@ describe("React Signals Babel Transform", () => {
 			}
 
 			const state: VisitorState = {};
-			traverse(result.ast, programScopeVisitor, undefined, state);
+			traverse(result.ast!, programScopeVisitor, undefined, state);
 
 			const scope = state.programScope;
 			if (!scope) {
@@ -674,6 +927,498 @@ describe("React Signals Babel Transform", () => {
 			expect(signalsBinding).to.exist;
 			expect(signalsBinding.kind).to.equal("module");
 			expect(signalsBinding.referenced).to.be.true;
+		});
+	});
+
+	describe("signal naming", () => {
+		const DEBUG_OPTIONS: PluginOptions = {
+			mode: "auto",
+			experimental: { debug: true },
+		};
+
+		const runDebugTest = async (
+			inputCode: string,
+			expectedOutput: string,
+			fileName: string
+		) => {
+			await runTest(inputCode, expectedOutput, DEBUG_OPTIONS, fileName);
+		};
+
+		it("injects names for signal calls", async () => {
+			const inputCode = `
+				function MyComponent() {
+					const count = signal(0);
+					const double = computed(() => count.value * 2);
+					return <div>{double.value}</div>;
+				}
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent() {
+					var _effect = _useSignals(1, "MyComponent");
+					try {
+						const count = signal(0, {
+							name: "count (Component.js:3)",
+						});
+						const double = computed(() => count.value * 2, {
+							name: "double (Component.js:4)",
+						});
+						return <div>{double.value}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runDebugTest(inputCode, expectedOutput, "Component.js");
+		});
+
+		it("injects names for useSignal calls", async () => {
+			const inputCode = `
+				function MyComponent() {
+					const count = useSignal(0);
+					const message = useSignal("hello");
+					return <div>{count.value} {message.value}</div>;
+				}
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent() {
+					var _effect = _useSignals(1, "MyComponent");
+					try {
+						const count = useSignal(0, {
+							name: "count (Component.js:3)",
+						});
+						const message = useSignal("hello", {
+							name: "message (Component.js:4)",
+						});
+						return <div>{count.value} {message.value}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runDebugTest(inputCode, expectedOutput, "Component.js");
+		});
+
+		it("doesn't inject names when already provided", async () => {
+			const inputCode = `
+				function MyComponent() {
+					const count = signal(0, { name: "myCounter" });
+					const data = useSignal(null, { name: "userData", watched: () => {} });
+					const total = computed(() => 1, { ["name"]: "total" });
+					return <div>{count.value}</div>;
+				}
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent() {
+					var _effect = _useSignals(1, "MyComponent");
+					try {
+						const count = signal(0, {
+							name: "myCounter",
+						});
+						const data = useSignal(null, {
+							name: "userData",
+							watched: () => {},
+						});
+						const total = computed(() => 1, {
+							["name"]: "total",
+						});
+						return <div>{count.value}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runDebugTest(inputCode, expectedOutput, "Component.js");
+		});
+
+		it("handles signals with no initial value", async () => {
+			const inputCode = `
+				function MyComponent() {
+					const count = useSignal();
+					return <div>{count.value}</div>;
+				}
+			`;
+
+			const expectedOutput = `
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent() {
+					var _effect = _useSignals(1, "MyComponent");
+					try {
+						const count = useSignal(undefined, {
+							name: "count (Component.js:3)",
+						});
+						return <div>{count.value}</div>;
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runDebugTest(inputCode, expectedOutput, "Component.js");
+		});
+
+		it("derives names from surrounding syntax", () => {
+			const inputCode = [
+				"class Store {",
+				"  count = signal(0);",
+				"  #selected = signal(false);",
+				"  constructor() {",
+				'    this.status = signal("idle");',
+				'    this["message"] = computed(() => "");',
+				"  }",
+				"  load() {",
+				"    return computed(() => this.status.value);",
+				"  }",
+				"}",
+				"const model = {",
+				"  enabled: signal(true),",
+				'  "label": computed(() => "label"),',
+				'  0: signal("zero"),',
+				"};",
+				"function createVisible() {",
+				"  return signal(true);",
+				"}",
+				"consume(signal(false));",
+				"const createSelected = () => signal(true);",
+				"const rows = values.map(() => signal(0));",
+				'const key = "dynamic";',
+				"const dynamic = {[key]: computed(() => key)};",
+				"const options = getOptions();",
+				"const preserved = signal(0, options);",
+				"const spread = signal(0, {...options});",
+				"[first] = [signal(0)];",
+				"effect(() => {});",
+				"useSignalEffect(() => {});",
+				'effect(() => {}, {name: "manual"});',
+			].join("\n");
+
+			const output = transformCode(inputCode, DEBUG_OPTIONS, "Models.js");
+
+			for (const expectedName of [
+				"count (Models.js:2)",
+				"#selected (Models.js:3)",
+				"status (Models.js:5)",
+				"message (Models.js:6)",
+				"load (Models.js:9)",
+				"enabled (Models.js:13)",
+				"label (Models.js:14)",
+				"0 (Models.js:15)",
+				"createVisible (Models.js:18)",
+				"Models.js:20",
+				"createSelected (Models.js:21)",
+				"Models.js:22",
+				"Models.js:24",
+				"Models.js:28",
+				"Models.js:29",
+				"Models.js:30",
+			]) {
+				expect(output).toContain(`name: "${expectedName}"`);
+			}
+			expect(output).toContain("const preserved = signal(0, options);");
+			expect(output).not.toContain("preserved (Models.js:26)");
+			expect(output).not.toContain("spread (Models.js:27)");
+			expect(output).toContain('name: "manual"');
+		});
+	});
+
+	describe("detectTransformedJSX option", () => {
+		it("detects elements created using react/jsx-runtime import", async () => {
+			const inputCode = `
+				import { jsx as _jsx } from "react/jsx-runtime";
+				function MyComponent() {
+					signal.value;
+					return _jsx("div", { children: "Hello World" });
+				};
+			`;
+
+			const expectedOutput = `
+				import { jsx as _jsx } from "react/jsx-runtime";
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent() {
+					var _effect = _useSignals(1);
+					try {
+						signal.value;
+						return _jsx("div", {
+							children: "Hello World",
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput, {
+				detectTransformedJSX: true,
+			});
+		});
+
+		it("detects elements created using react/jsx-runtime cjs require", async () => {
+			const inputCode = `
+				const jsxRuntime = require("react/jsx-runtime");
+				function MyComponent() {
+					signal.value;
+					return jsxRuntime.jsx("div", { children: "Hello World" });
+				};
+			`;
+
+			const expectedOutput = `
+				var _useSignals = require("@preact/signals-react/runtime").useSignals
+				const jsxRuntime = require("react/jsx-runtime");
+				function MyComponent() {
+					var _effect = _useSignals(1);
+					try {
+						signal.value;
+						return jsxRuntime.jsx("div", {
+							children: "Hello World",
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(
+				inputCode,
+				expectedOutput,
+				{
+					detectTransformedJSX: true,
+				},
+				undefined,
+				true
+			);
+		});
+
+		it("detects elements created using react/jsx-runtime cjs destuctured import", async () => {
+			const inputCode = `
+				const { jsx } = require("react/jsx-runtime");
+				function MyComponent() {
+					signal.value;
+					return jsx("div", { children: "Hello World" });
+				};
+			`;
+
+			const expectedOutput = `
+				var _useSignals = require("@preact/signals-react/runtime").useSignals
+				const { jsx } = require("react/jsx-runtime");
+				function MyComponent() {
+					var _effect = _useSignals(1);
+					try {
+						signal.value;
+						return jsx("div", {
+							children: "Hello World",
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(
+				inputCode,
+				expectedOutput,
+				{
+					detectTransformedJSX: true,
+				},
+				undefined,
+				true
+			);
+		});
+
+		it("does not detect jsx-runtime calls when detectJSXAlternatives is disabled", async () => {
+			const inputCode = `
+				import { jsx as _jsx } from "react/jsx-runtime";
+				function MyComponent() {
+					signal.value;
+					return _jsx("div", { children: "Hello World" });
+				};
+			`;
+
+			// Should not transform because jsx-runtime detection is disabled - no useSignals import should be added
+			const expectedOutput = `
+				import { jsx as _jsx } from "react/jsx-runtime";
+				function MyComponent() {
+					signal.value;
+					return _jsx("div", {
+						children: "Hello World",
+					});
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput, {
+				detectTransformedJSX: false,
+			});
+		});
+
+		it("detects createElement calls created using react import", async () => {
+			const inputCode = `
+				import { createElement } from "react";
+				function MyComponent() {
+					signal.value;
+					return createElement("div", { children: "Hello World" });
+				};
+			`;
+
+			const expectedOutput = `
+				import { createElement } from "react";
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent() {
+					var _effect = _useSignals(1);
+					try {
+						signal.value;
+						return createElement("div", {
+							children: "Hello World",
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput, {
+				detectTransformedJSX: true,
+			});
+		});
+
+		it("detects createElement calls created using react default import", async () => {
+			const inputCode = `
+				import React from "react";
+				function MyComponent() {
+					signal.value;
+					return React.createElement("div", { children: "Hello World" });
+				};
+			`;
+
+			const expectedOutput = `
+				import React from "react";
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent() {
+					var _effect = _useSignals(1);
+					try {
+						signal.value;
+						return React.createElement("div", {
+							children: "Hello World",
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput, {
+				detectTransformedJSX: true,
+			});
+		});
+
+		it("detects createElement calls created using react cjs require", async () => {
+			const inputCode = `
+				const React = require("react");
+				function MyComponent() {
+					signal.value;
+					return React.createElement("div", { children: "Hello World" });
+				};
+			`;
+
+			const expectedOutput = `
+				var _useSignals = require("@preact/signals-react/runtime").useSignals
+				const React = require("react");
+				function MyComponent() {
+					var _effect = _useSignals(1);
+					try {
+						signal.value;
+						return React.createElement("div", {
+							children: "Hello World",
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(
+				inputCode,
+				expectedOutput,
+				{
+					detectTransformedJSX: true,
+				},
+				undefined,
+				true
+			);
+		});
+
+		it("detects createElement calls created using destructured react cjs require", async () => {
+			const inputCode = `
+				const { createElement } = require("react");
+				function MyComponent() {
+					signal.value;
+					return createElement("div", { children: "Hello World" });
+				};
+			`;
+
+			const expectedOutput = `
+				var _useSignals = require("@preact/signals-react/runtime").useSignals
+				const { createElement } = require("react");
+				function MyComponent() {
+					var _effect = _useSignals(1);
+					try {
+						signal.value;
+						return createElement("div", {
+							children: "Hello World",
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(
+				inputCode,
+				expectedOutput,
+				{
+					detectTransformedJSX: true,
+				},
+				undefined,
+				true
+			);
+		});
+
+		it("detects signal access in nested functions", async () => {
+			const inputCode = `
+				import { jsx } from "react/jsx-runtime";
+				function MyComponent(props) {
+					return props.listSignal.value.map(function iteration(x) {
+						return jsx("div", { children: x });
+					});
+				};
+			`;
+
+			const expectedOutput = `
+				import { jsx } from "react/jsx-runtime";
+				import { useSignals as _useSignals } from "@preact/signals-react/runtime";
+				function MyComponent(props) {
+					var _effect = _useSignals(1);
+					try {
+						return props.listSignal.value.map(function iteration(x) {
+							return jsx("div", {
+								children: x,
+							});
+						});
+					} finally {
+						_effect.f();
+					}
+				}
+			`;
+
+			await runTest(inputCode, expectedOutput, {
+				detectTransformedJSX: true,
+			});
 		});
 	});
 });

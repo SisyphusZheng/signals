@@ -1,5 +1,83 @@
 # @preact/signals-react-transform
 
+## 0.8.2
+
+### Patch Changes
+
+- [#957](https://github.com/preactjs/signals/pull/957) [`3cac6eb`](https://github.com/preactjs/signals/commit/3cac6eb1e58bee72c0a6c38fd2d0d04d6df9d46c) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Improve generated debug names for signals created outside variable declarations.
+
+- [#960](https://github.com/preactjs/signals/pull/960) [`3d0f647`](https://github.com/preactjs/signals/commit/3d0f647e92d0c1a1e12410417cfb01d1e61d227b) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Name effects and signal effects during debug transforms, and use their source location when no contextual name can be derived.
+
+- Updated dependencies [[`6b051b5`](https://github.com/preactjs/signals/commit/6b051b538622951a9bb10ba9655cb4ae12872f9a)]:
+  - @preact/signals-react@3.11.0
+
+## 0.8.1
+
+### Patch Changes
+
+- [#814](https://github.com/preactjs/signals/pull/814) [`a5d0a6e`](https://github.com/preactjs/signals/commit/a5d0a6e74684a91cbe2354b60f3da3d862e1198b) Thanks [@andrewiggins](https://github.com/andrewiggins)! - Fix JSX detection leaking to non-component functions in the same scope
+
+  Previously, when a component containing JSX was defined inside another function, the JSX detection could incorrectly "leak" to sibling functions or the parent function, causing non-components to be transformed. This was especially problematic in test files where components are defined inside `it()` or `describe()` blocks.
+
+  ```js
+  describe("suite", () => {
+  	it("test", () => {
+  		// This arrow function was incorrectly transformed because
+  		// Counter's JSX detection leaked to sibling functions
+  		const CountModel = () => signal.value;
+  		function Counter() {
+  			return <div>Hello</div>;
+  		}
+  	});
+  });
+  ```
+
+  The transform now correctly scopes JSX and signal usage detection to only the containing component or custom hook function.
+
+- Updated dependencies [[`5794b04`](https://github.com/preactjs/signals/commit/5794b0418ef6a04810ade08e2a8237c66e61ed4b)]:
+  - @preact/signals-react@3.8.0
+
+## 0.8.0
+
+### Minor Changes
+
+- [#839](https://github.com/preactjs/signals/pull/839) [`18969fa`](https://github.com/preactjs/signals/commit/18969fada30397f537828af9e839acc7348f9684) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Add `componentName` to `useSignals` for debugging
+
+### Patch Changes
+
+- Updated dependencies [[`ac5032e`](https://github.com/preactjs/signals/commit/ac5032e63000cdb0bf84e20a1b44c161788a1607), [`18969fa`](https://github.com/preactjs/signals/commit/18969fada30397f537828af9e839acc7348f9684)]:
+  - @preact/signals-react@3.7.0
+
+## 0.7.0
+
+### Minor Changes
+
+- [#819](https://github.com/preactjs/signals/pull/819) [`8a8b0d1`](https://github.com/preactjs/signals/commit/8a8b0d109d324a5764289674e580e693683de04d) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Remove the need for enter/exit component and track the effects normally
+
+### Patch Changes
+
+- Updated dependencies [[`f17889b`](https://github.com/preactjs/signals/commit/f17889b6d46448205d9485b8d5e691fbe05cd404)]:
+  - @preact/signals-react@3.6.2
+
+## 0.6.0
+
+### Minor Changes
+
+- [#730](https://github.com/preactjs/signals/pull/730) [`8423511`](https://github.com/preactjs/signals/commit/842351176eb5588290786db55a5596c920df109d) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Surface component-name and automatically name signals/computeds during the transform. This is gated behind the `experimental.debug` option
+
+### Patch Changes
+
+- Updated dependencies [[`6cc7005`](https://github.com/preactjs/signals/commit/6cc700595278d241f276c40dd0ecf162c9e432d8)]:
+  - @preact/signals-react@3.3.0
+
+## 0.5.2
+
+### Patch Changes
+
+- [#691](https://github.com/preactjs/signals/pull/691) [`960b09d`](https://github.com/preactjs/signals/commit/960b09d07134595c73d5921a4f294f82f7613daa) Thanks [@robin-drexler](https://github.com/robin-drexler)! - Adds `detectTransformedJSX` option which will trigger transformation when alternative methods (like `React.createElement`) are used to create elements
+
+- [#693](https://github.com/preactjs/signals/pull/693) [`b19ddec`](https://github.com/preactjs/signals/commit/b19ddec358f0bae8ad6338e1ca103c33b317650b) Thanks [@robin-drexler](https://github.com/robin-drexler)! - Destructured access to signal values should be registered as usage, before this change Babel would skip a component that would access `.value` on a signal through destructuring
+
 ## 0.5.1
 
 ### Patch Changes

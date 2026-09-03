@@ -1,12 +1,8 @@
-import { signal } from "@preact/signals";
-import {
-	For,
-	Show,
-	useAsyncComputed,
-	useSignalRef,
-} from "@preact/signals/utils";
+import { computed, signal } from "@preact/signals";
+import { For, Show, useSignalRef } from "@preact/signals/utils";
 import { render, createElement } from "preact";
 import { act } from "preact/test-utils";
+import { describe, beforeEach, afterEach, it, expect } from "vitest";
 
 describe("@preact/signals-utils", () => {
 	let scratch: HTMLDivElement;
@@ -39,6 +35,134 @@ describe("@preact/signals-utils", () => {
 			});
 			expect(scratch.innerHTML).to.eq("<p>Showing</p>");
 		});
+
+		it("Should reactively show an inline element w/ nested reactivity", () => {
+			const count = signal(0);
+			const visible = computed(() => count.value > 0)!;
+			const Paragraph = (props: any) => <p>{props.children}</p>;
+			act(() => {
+				render(
+					<Show when={visible} fallback={<Paragraph>Hiding</Paragraph>}>
+						<Paragraph>Showing {count}</Paragraph>
+					</Show>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq("<p>Hiding</p>");
+
+			act(() => {
+				count.value = 1;
+			});
+			expect(scratch.innerHTML).to.eq("<p>Showing 1</p>");
+
+			act(() => {
+				count.value = 2;
+			});
+			expect(scratch.innerHTML).to.eq("<p>Showing 2</p>");
+		});
+
+		it("Should call function fallback lazily", () => {
+			const toggle = signal(true)!;
+			let fallbackCalled = false;
+
+			act(() => {
+				render(
+					<Show
+						when={toggle}
+						fallback={() => {
+							fallbackCalled = true;
+							return <p>Hidden</p>;
+						}}
+					>
+						<p>Shown</p>
+					</Show>,
+					scratch
+				);
+			});
+
+			// When condition is true, fallback should NOT have been called
+			expect(fallbackCalled).to.eq(false);
+			expect(scratch.innerHTML).to.eq("<p>Shown</p>");
+
+			act(() => {
+				toggle.value = false;
+			});
+
+			// Now fallback should have been called
+			expect(fallbackCalled).to.eq(true);
+			expect(scratch.innerHTML).to.eq("<p>Hidden</p>");
+		});
+
+		it("Should reactively show with lazy function fallback", () => {
+			const toggle = signal(false)!;
+			const Paragraph = (props: any) => <p>{props.children}</p>;
+
+			act(() => {
+				render(
+					<Show when={toggle} fallback={() => <Paragraph>Hiding</Paragraph>}>
+						<Paragraph>Showing</Paragraph>
+					</Show>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq("<p>Hiding</p>");
+
+			act(() => {
+				toggle.value = true;
+			});
+			expect(scratch.innerHTML).to.eq("<p>Showing</p>");
+
+			act(() => {
+				toggle.value = false;
+			});
+			expect(scratch.innerHTML).to.eq("<p>Hiding</p>");
+		});
+
+		it("Should preserve signal props after unmount/remount cycle", () => {
+			const counter = signal(0);
+			const visible = computed(() => counter.value >= 1 && counter.value <= 2);
+			const cls = computed(() => `val-${counter.value}`);
+			act(() => {
+				render(
+					<Show when={visible}>
+						<div class={cls}>content</div>
+					</Show>,
+					scratch
+				);
+			});
+			// counter=0, not visible
+			expect(scratch.innerHTML).to.eq("");
+
+			act(() => {
+				counter.value = 1;
+			});
+			// counter=1, visible first time
+			expect(scratch.innerHTML).to.eq('<div class="val-1">content</div>');
+
+			act(() => {
+				counter.value = 2;
+			});
+			// counter=2, still visible, class updates
+			expect(scratch.innerHTML).to.eq('<div class="val-2">content</div>');
+
+			act(() => {
+				counter.value = 0;
+			});
+			// counter=0, unmounted
+			expect(scratch.innerHTML).to.eq("");
+
+			act(() => {
+				counter.value = 1;
+			});
+			// counter=1, remounted — signal props must still work
+			expect(scratch.innerHTML).to.eq('<div class="val-1">content</div>');
+
+			act(() => {
+				counter.value = 2;
+			});
+			// counter=2, class should update after remount
+			expect(scratch.innerHTML).to.eq('<div class="val-2">content</div>');
+		});
 	});
 
 	describe("<For />", () => {
@@ -59,6 +183,296 @@ describe("@preact/signals-utils", () => {
 				list.value = ["foo", "bar"];
 			});
 			expect(scratch.innerHTML).to.eq("<p>foo</p><p>bar</p>");
+		});
+
+		it("Should call function fallback lazily", () => {
+			const list = signal<Array<string>>(["foo", "bar"])!;
+			let fallbackCalled = false;
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+
+			act(() => {
+				render(
+					<For
+						each={list}
+						fallback={() => {
+							fallbackCalled = true;
+							return <Paragraph>No items</Paragraph>;
+						}}
+					>
+						{item => <Paragraph key={item}>{item}</Paragraph>}
+					</For>,
+					scratch
+				);
+			});
+
+			// When list has items, fallback should NOT have been called
+			expect(fallbackCalled).to.eq(false);
+			expect(scratch.innerHTML).to.eq("<p>foo</p><p>bar</p>");
+
+			act(() => {
+				list.value = [];
+			});
+
+			// Now fallback should have been called
+			expect(fallbackCalled).to.eq(true);
+			expect(scratch.innerHTML).to.eq("<p>No items</p>");
+		});
+
+		it("Should reactively show items with lazy function fallback", () => {
+			const list = signal<Array<string>>([])!;
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+
+			act(() => {
+				render(
+					<For each={list} fallback={() => <Paragraph>No items</Paragraph>}>
+						{item => <Paragraph key={item}>{item}</Paragraph>}
+					</For>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq("<p>No items</p>");
+
+			act(() => {
+				list.value = ["foo", "bar"];
+			});
+			expect(scratch.innerHTML).to.eq("<p>foo</p><p>bar</p>");
+
+			act(() => {
+				list.value = [];
+			});
+			expect(scratch.innerHTML).to.eq("<p>No items</p>");
+		});
+
+		it("Should iterate over a list of signals w/ nested reactivity", () => {
+			const list = signal<Array<string>>([])!;
+			const test = signal("foo");
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+			act(() => {
+				render(
+					<For each={list} fallback={<Paragraph>No items</Paragraph>}>
+						{item => (
+							<Paragraph key={item}>
+								{item}-{test.value}
+							</Paragraph>
+						)}
+					</For>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq("<p>No items</p>");
+
+			act(() => {
+				list.value = ["foo", "bar"];
+			});
+			expect(scratch.innerHTML).to.eq("<p>foo-foo</p><p>bar-foo</p>");
+
+			act(() => {
+				test.value = "baz";
+			});
+			expect(scratch.innerHTML).to.eq("<p>foo-baz</p><p>bar-baz</p>");
+
+			act(() => {
+				list.value = ["foo", "bar", "qux"];
+			});
+			expect(scratch.innerHTML).to.eq(
+				"<p>foo-baz</p><p>bar-baz</p><p>qux-baz</p>"
+			);
+		});
+
+		it("Should accept readonly list types", () => {
+			const plain: readonly string[] = ["foo", "bar"];
+			const list = signal<readonly string[]>(["baz", "qux"]);
+			const computedList = computed((): readonly string[] => list.value);
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+
+			act(() => {
+				render(
+					<div>
+						<For each={plain}>{item => <Paragraph>{item}</Paragraph>}</For>
+						<For each={list}>{item => <Paragraph>{item}</Paragraph>}</For>
+						<For each={() => computedList}>
+							{item => <Paragraph>{item}</Paragraph>}
+						</For>
+					</div>,
+					scratch
+				);
+			});
+
+			expect(scratch.innerHTML).to.eq(
+				"<div><p>foo</p><p>bar</p><p>baz</p><p>qux</p><p>baz</p><p>qux</p></div>"
+			);
+		});
+
+		it("Should pass updated indexes to reused items after removal", () => {
+			const alice = { id: "a", label: "Alice" };
+			const bob = { id: "b", label: "Bob" };
+			const carol = { id: "c", label: "Carol" };
+			const list = signal([alice, bob, carol]);
+			const rerender = signal(0);
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+
+			act(() => {
+				render(
+					<For each={list} getKey={item => item.id}>
+						{(item, index) => (
+							<Paragraph>
+								{item.label}:{index}:{rerender.value}
+							</Paragraph>
+						)}
+					</For>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq(
+				"<p>Alice:0:0</p><p>Bob:1:0</p><p>Carol:2:0</p>"
+			);
+
+			act(() => {
+				list.value = [bob, carol];
+			});
+			act(() => {
+				rerender.value = 1;
+			});
+			expect(scratch.innerHTML).to.eq("<p>Bob:0:1</p><p>Carol:1:1</p>");
+		});
+
+		it("Should pass updated indexes to object items after removal without getKey", () => {
+			const alice = { label: "Alice" };
+			const bob = { label: "Bob" };
+			const carol = { label: "Carol" };
+			const list = signal([alice, bob, carol]);
+			const rerender = signal(0);
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+
+			act(() => {
+				render(
+					<For each={list}>
+						{(item, index) => (
+							<Paragraph>
+								{item.label}:{index}:{rerender.value}
+							</Paragraph>
+						)}
+					</For>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq(
+				"<p>Alice:0:0</p><p>Bob:1:0</p><p>Carol:2:0</p>"
+			);
+
+			act(() => {
+				list.value = [bob, carol];
+			});
+			act(() => {
+				rerender.value = 1;
+			});
+			expect(scratch.innerHTML).to.eq("<p>Bob:0:1</p><p>Carol:1:1</p>");
+		});
+
+		it("Should preserve DOM identity of reused items after a re-index without getKey", () => {
+			const alice = { label: "Alice" };
+			const bob = { label: "Bob" };
+			const carol = { label: "Carol" };
+			const list = signal([alice, bob, carol]);
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+
+			act(() => {
+				render(
+					<For each={list}>
+						{(item, index) => (
+							<Paragraph>
+								{item.label}:{index}
+							</Paragraph>
+						)}
+					</For>,
+					scratch
+				);
+			});
+			const bobNodeBefore = scratch.querySelectorAll("p")[1];
+
+			act(() => {
+				list.value = [bob, carol];
+			});
+
+			// Bob's index changed 1 -> 0. Because the cached vnode is reused (not
+			// recreated with a new positional key), Bob keeps the very same DOM
+			// node. Recreating the vnode here would re-key it to 0 and reconcile
+			// Bob into Alice's old node, losing focus/state.
+			const bobNodeAfter = scratch.querySelectorAll("p")[0];
+			expect(scratch.innerHTML).to.eq("<p>Bob:0</p><p>Carol:1</p>");
+			expect(bobNodeAfter).to.equal(bobNodeBefore);
+		});
+
+		it("Should use getKey for stable identity on item removal", () => {
+			const list = signal([
+				{ id: "a", label: "Alice" },
+				{ id: "b", label: "Bob" },
+				{ id: "c", label: "Carol" },
+			]);
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+			act(() => {
+				render(
+					<For each={list} getKey={item => item.id}>
+						{item => <Paragraph>{item.label}</Paragraph>}
+					</For>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq("<p>Alice</p><p>Bob</p><p>Carol</p>");
+
+			// Remove middle item
+			act(() => {
+				list.value = [
+					{ id: "a", label: "Alice" },
+					{ id: "c", label: "Carol" },
+				];
+			});
+			expect(scratch.innerHTML).to.eq("<p>Alice</p><p>Carol</p>");
+		});
+
+		it("Should handle duplicate values with getKey", () => {
+			const list = signal([
+				{ id: 1, name: "foo" },
+				{ id: 2, name: "foo" },
+			]);
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+			act(() => {
+				render(
+					<For each={list} getKey={item => item.id}>
+						{item => <Paragraph>{item.name}</Paragraph>}
+					</For>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq("<p>foo</p><p>foo</p>");
+		});
+
+		it("Should reorder correctly with getKey", () => {
+			const list = signal([
+				{ id: "x", label: "X" },
+				{ id: "y", label: "Y" },
+				{ id: "z", label: "Z" },
+			]);
+			const Paragraph = (p: any) => <p>{p.children}</p>;
+			act(() => {
+				render(
+					<For each={list} getKey={item => item.id}>
+						{item => <Paragraph>{item.label}</Paragraph>}
+					</For>,
+					scratch
+				);
+			});
+			expect(scratch.innerHTML).to.eq("<p>X</p><p>Y</p><p>Z</p>");
+
+			// Reverse order
+			act(() => {
+				list.value = [
+					{ id: "z", label: "Z" },
+					{ id: "y", label: "Y" },
+					{ id: "x", label: "X" },
+				];
+			});
+			expect(scratch.innerHTML).to.eq("<p>Z</p><p>Y</p><p>X</p>");
 		});
 	});
 
@@ -84,123 +498,6 @@ describe("@preact/signals-utils", () => {
 			});
 			expect(scratch.innerHTML).to.eq("<span>1</span>");
 			expect((ref as any).value instanceof HTMLSpanElement).to.eq(true);
-		});
-	});
-
-	describe("asyncComputed", () => {
-		let resolve: (value: { foo: string }) => void;
-		const fetchResult = (url: string): Promise<{ foo: string }> => {
-			// eslint-disable-next-line no-console
-			console.log("fetching", url);
-			return new Promise(res => {
-				resolve = res;
-			});
-		};
-
-		it("Should reactively update when the promise resolves", async () => {
-			const AsyncComponent = (props: any) => {
-				const data = useAsyncComputed<{ foo: string }>(
-					async () => fetchResult(props.url.value),
-					{ suspend: false }
-				);
-				const hasData = data.value !== undefined;
-				return (
-					<p>
-						{data.pending ? "pending" : hasData ? data.value?.foo : "error"}
-					</p>
-				);
-			};
-			const url = signal("/api/foo?id=1");
-			act(() => {
-				render(<AsyncComponent url={url} />, scratch);
-			});
-			expect(scratch.innerHTML).to.eq("<p>pending</p>");
-
-			await act(async () => {
-				await resolve({ foo: "bar" });
-				await new Promise(resolve => setTimeout(resolve, 100));
-			});
-
-			expect(scratch.innerHTML).to.eq("<p>bar</p>");
-		});
-
-		it("Should fetch when the input changes", async () => {
-			const AsyncComponent = (props: any) => {
-				const data = useAsyncComputed<{ foo: string }>(
-					async () => fetchResult(props.url.value),
-					{ suspend: false }
-				);
-				const hasData = data.value !== undefined;
-				return (
-					<p>
-						{data.pending ? "pending" : hasData ? data.value?.foo : "error"}
-					</p>
-				);
-			};
-			const url = signal("/api/foo?id=1");
-			act(() => {
-				render(<AsyncComponent url={url} />, scratch);
-			});
-			expect(scratch.innerHTML).to.eq("<p>pending</p>");
-
-			await act(async () => {
-				await resolve({ foo: "bar" });
-				await new Promise(resolve => setTimeout(resolve));
-			});
-
-			expect(scratch.innerHTML).to.eq("<p>bar</p>");
-
-			act(() => {
-				url.value = "/api/foo?id=2";
-			});
-
-			await act(async () => {
-				await resolve({ foo: "baz" });
-				await new Promise(resolve => setTimeout(resolve));
-			});
-			expect(scratch.innerHTML).to.eq("<p>baz</p>");
-		});
-
-		it("Should apply the 'running' signal", async () => {
-			const AsyncComponent = (props: any) => {
-				const data = useAsyncComputed<{ foo: string }>(
-					async () => fetchResult(props.url.value),
-					{ suspend: false }
-				);
-				const hasData = data.value !== undefined;
-				return (
-					<p>
-						{data.running.value
-							? "running"
-							: hasData
-							? data.value?.foo
-							: "error"}
-					</p>
-				);
-			};
-			const url = signal("/api/foo?id=1");
-			act(() => {
-				render(<AsyncComponent url={url} />, scratch);
-			});
-			expect(scratch.innerHTML).to.eq("<p>running</p>");
-
-			await act(async () => {
-				await resolve({ foo: "bar" });
-				await new Promise(resolve => setTimeout(resolve));
-			});
-
-			expect(scratch.innerHTML).to.eq("<p>bar</p>");
-
-			act(() => {
-				url.value = "/api/foo?id=2";
-			});
-			expect(scratch.innerHTML).to.eq("<p>running</p>");
-
-			await act(async () => {
-				await resolve({ foo: "baz" });
-				await new Promise(resolve => setTimeout(resolve));
-			});
-			expect(scratch.innerHTML).to.eq("<p>baz</p>");
 		});
 	});
 });

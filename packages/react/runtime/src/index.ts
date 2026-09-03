@@ -5,8 +5,12 @@ import {
 	Signal,
 	ReadonlySignal,
 	SignalOptions,
+	EffectOptions,
+	type Model,
+	type ModelConstructor,
 } from "@preact/signals-core";
 import {
+	useState,
 	useRef,
 	useMemo,
 	useEffect,
@@ -14,6 +18,7 @@ import {
 	version as reactVersion,
 } from "react";
 import { useSyncExternalStore } from "use-sync-external-store/shim/index.js";
+import type { SignalsDevToolsAPI } from "../../../debug/src/devtools";
 
 const [major] = reactVersion.split(".").map(Number);
 const Empty = [] as const;
@@ -22,6 +27,9 @@ const Empty = [] as const;
 const ReactElemType = Symbol.for(
 	major >= 19 ? "react.transitional.element" : "react.element"
 );
+
+const DEVTOOLS_ENABLED =
+	typeof window !== "undefined" && !!window.__PREACT_SIGNALS_DEVTOOLS__;
 
 export function wrapJsx<T>(jsx: T): T {
 	if (typeof jsx !== "function") return jsx;
@@ -45,6 +53,7 @@ const symDispose: unique symbol =
 
 interface Effect {
 	_sources: object | undefined;
+	_debugCallback?: () => void;
 	_start(): () => void;
 	_callback(): void;
 	_dispose(): void;
@@ -140,17 +149,26 @@ function finishComponentEffect(
  * invoked in a component's body or hook body. See the comment on
  * `EffectStoreUsage` for more details.
  */
-function createEffectStore(_usage: EffectStoreUsage): EffectStore {
+function createEffectStore(
+	_usage: EffectStoreUsage,
+	componentName?: string
+): EffectStore {
 	let effectInstance!: Effect;
 	let endEffect: (() => void) | undefined;
 	let version = 0;
 	let onChangeNotifyReact: (() => void) | undefined;
 
-	let unsubscribe = effect(function (this: Effect) {
-		effectInstance = this;
-	});
+	let unsubscribe = effect(
+		function (this: Effect) {
+			effectInstance = this;
+		},
+		{ name: componentName || "Component" }
+	);
 	effectInstance._callback = function () {
 		version = (version + 1) | 0;
+		if (DEVTOOLS_ENABLED) {
+			effectInstance._debugCallback?.call(effectInstance);
+		}
 		if (onChangeNotifyReact) onChangeNotifyReact();
 	};
 
@@ -334,7 +352,8 @@ const useIsomorphicLayoutEffect =
  * subscribe to changes to rerender the component when the signals change.
  */
 export function _useSignalsImplementation(
-	_usage: EffectStoreUsage = UNMANAGED
+	_usage: EffectStoreUsage = UNMANAGED,
+	componentName?: string
 ): EffectStore {
 	ensureFinalCleanup();
 
@@ -343,7 +362,7 @@ export function _useSignalsImplementation(
 		if (typeof window === "undefined") {
 			storeRef.current = emptyEffectStore;
 		} else {
-			storeRef.current = createEffectStore(_usage);
+			storeRef.current = createEffectStore(_usage, componentName);
 		}
 	}
 
@@ -375,14 +394,24 @@ Object.defineProperties(Signal.prototype, {
 	props: {
 		configurable: true,
 		get() {
-			return { data: this };
+			const s: Signal = this;
+			return {
+				data: {
+					get value() {
+						return s.value;
+					},
+				},
+			};
 		},
 	},
 	ref: { configurable: true, value: null },
 });
 
-export function useSignals(usage?: EffectStoreUsage): EffectStore {
-	return _useSignalsImplementation(usage);
+export function useSignals(
+	usage?: EffectStoreUsage,
+	componentName?: string
+): EffectStore {
+	return _useSignalsImplementation(usage, componentName);
 }
 
 export function useSignal<T>(value: T, options?: SignalOptions<T>): Signal<T>;
@@ -403,13 +432,42 @@ export function useComputed<T>(
 	return useMemo(() => computed<T>(() => $compute.current(), options), Empty);
 }
 
-export function useSignalEffect(cb: () => void | (() => void)) {
+export function useSignalEffect(
+	cb: () => void | (() => void),
+	options?: EffectOptions
+) {
 	const callback = useRef(cb);
 	callback.current = cb;
 
 	useEffect(() => {
 		return effect(function (this: Effect) {
 			return callback.current();
-		});
+		}, options);
 	}, Empty);
+}
+
+declare global {
+	interface Window {
+		__PREACT_SIGNALS_DEVTOOLS__: SignalsDevToolsAPI;
+	}
+}
+
+/** See comment in packages/core/src/index.ts on the same interface for an explanation */
+interface InternalModelConstructor<
+	TModel,
+	TArgs extends any[],
+> extends ModelConstructor<TModel, TArgs> {
+	(...args: TArgs): Model<TModel>;
+}
+
+export function useModel<TModel>(
+	factory: ModelConstructor<TModel, []> | (() => Model<TModel>)
+): Model<TModel> {
+	type InternalFactory =
+		| InternalModelConstructor<TModel, []>
+		| (() => Model<TModel>);
+
+	const [inst] = useState(() => (factory as InternalFactory)());
+	useEffect(() => inst[Symbol.dispose], [inst]);
+	return inst;
 }

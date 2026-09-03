@@ -7,23 +7,23 @@ Signals is a performant state management library with two primary goals:
 
 Read the [announcement post](https://preactjs.com/blog/introducing-signals/) to learn more about which problems signals solves and how it came to be.
 
-## Installation:
-
-```sh
-npm install @preact/signals
-```
-
-- [Guide / API](../../README.md#guide--api)
-  - [`signal(initialValue)`](../../README.md#signalinitialvalue)
-    - [`signal.peek()`](../../README.md#signalpeek)
-  - [`computed(fn)`](../../README.md#computedfn)
-  - [`effect(fn)`](../../README.md#effectfn)
-  - [`batch(fn)`](../../README.md#batchfn)
-  - [`untracked(fn)`](../../README.md#untrackedfn)
+- [Core API](../core/README.md#guide--api)
+  - [`signal(initialValue)`](../core/README.md#signalinitialvalue)
+    - [`signal.peek()`](../core/README.md#signalpeek)
+  - [`computed(fn)`](../core/README.md#computedfn)
+  - [`effect(fn)`](../core/README.md#effectfn)
+  - [`batch(fn)`](../core/README.md#batchfn)
+  - [`untracked(fn)`](../core/README.md#untrackedfn)
 - [Preact Integration](#preact-integration)
   - [Hooks](#hooks)
   - [Rendering optimizations](#rendering-optimizations)
     - [Attribute optimization (experimental)](#attribute-optimization-experimental)
+  - [Utility Components and Hooks](#utility-components-and-hooks)
+    - [Show Component](#show-component)
+    - [For Component](#for-component)
+    - [Additional Hooks](#additional-hooks)
+      - [`useLiveSignal`](#uselivesignal)
+      - [`useSignalRef`](#usesignalref)
 - [License](#license)
 
 ## Preact Integration
@@ -72,6 +72,29 @@ function Counter() {
 }
 ```
 
+#### `useModel`
+
+Use `useModel` to create a model instance once per component and automatically dispose it when the component unmounts.
+
+```js
+import { createModel, signal, useModel } from "@preact/signals";
+
+const CounterModel = createModel(() => ({
+	count: signal(0),
+	increment() {
+		this.count.value++;
+	},
+}));
+
+function Counter() {
+	const model = useModel(CounterModel);
+
+	return <button onClick={() => model.increment()}>{model.count.value}</button>;
+}
+```
+
+If your model needs constructor arguments, pass a factory function to `useModel` that creates the instance.
+
 ### Rendering optimizations
 
 The Preact adapter ships with several optimizations it can apply out of the box to skip virtual-dom rendering entirely. If you pass a signal directly into JSX, it will bind directly to the DOM `Text` node that is created and update that whenever the signal changes.
@@ -111,11 +134,11 @@ function Person() {
 
 This way we'll bypass checking the virtual-dom and update the DOM property directly.
 
-## Utility Components and Hooks
+### Utility Components and Hooks
 
 The `@preact/signals/utils` package provides additional utility components and hooks to make working with signals even easier.
 
-### Show Component
+#### Show Component
 
 The `Show` component provides a declarative way to conditionally render content based on a signal's value.
 
@@ -139,7 +162,7 @@ function App() {
 }
 ```
 
-### For Component
+#### For Component
 
 The `For` component helps you render lists from signal arrays with automatic caching of rendered items.
 
@@ -158,9 +181,9 @@ function App() {
 }
 ```
 
-### Additional Hooks
+#### Additional Hooks
 
-#### useLiveSignal
+##### useLiveSignal
 
 The `useLiveSignal` hook allows you to create a local signal that stays synchronized with an external signal.
 
@@ -176,7 +199,7 @@ function Component() {
 }
 ```
 
-#### useSignalRef
+##### useSignalRef
 
 The `useSignalRef` hook creates a signal that behaves like a React ref with a `.current` property.
 
@@ -188,68 +211,6 @@ function Component() {
 	return <div ref={ref}>The ref's value is {ref.current}</div>;
 }
 ```
-
-### `useAsyncComputed<T>(compute: () => Promise<T> | T, options?: AsyncComputedOptions)`
-
-A Preact hook that creates a signal that computes its value asynchronously. This is particularly useful for handling async data fetching and other asynchronous operations in a reactive way.
-
-> You can also import `asyncComputed` as a non-hook way
-
-#### Parameters
-
-- `compute`: A function that returns either a Promise or a direct value.
-  Using signals here will track them, when the signal changes it will re-execute `compute`.
-- `options`: Configuration options
-  - `suspend?: boolean`: Whether to enable Suspense support (defaults to true)
-
-#### Returns
-
-An `AsyncComputed<T>` object with the following properties:
-
-- `value: T | undefined`: The current value (undefined while loading)
-- `error: Signal<unknown>`: Signal containing any error that occurred
-- `running: Signal<boolean>`: Signal indicating if the computation is in progress
-
-> When inputs to `compute` change the value and error will be retained but `running` will be `true`.
-
-#### Example
-
-```typescript
-import { useAsyncComputed } from "@preact/signals/utils";
-
-function UserProfile({ userId }: { userId: Signal<string> }) {
-	const userData = useAsyncComputed(
-		async () => {
-			const response = await fetch(`/api/users/${userId.value}`);
-			return response.json();
-		},
-		{ suspend: false }
-	);
-
-	if (userData.running.value) {
-		return <div>Loading...</div>;
-	}
-
-	if (userData.error.value) {
-		return <div>Error: {String(userData.error.value)}</div>;
-	}
-
-	return (
-		<div>
-			<h1>{userData.value?.name}</h1>
-			<p>{userData.value?.email}</p>
-		</div>
-	);
-}
-```
-
-The hook will automatically:
-
-- Recompute when dependencies change (e.g., when `userId` changes)
-- Handle loading and error states
-- Clean up subscriptions when the component unmounts
-- Cache results between re-renders
-- Support Suspense when `suspend: true`
 
 ## License
 

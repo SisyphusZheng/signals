@@ -5,10 +5,16 @@ import {
 	computed,
 	batch,
 	effect,
+	action,
+	createModel,
+	type Model,
+	type ModelConstructor,
+	type ModelFactory,
 	Signal,
 	type ReadonlySignal,
 	untracked,
 	SignalOptions,
+	EffectOptions,
 } from "@preact/signals-core";
 import {
 	VNode,
@@ -25,10 +31,18 @@ export {
 	computed,
 	batch,
 	effect,
+	action,
+	type Model,
+	type ModelConstructor,
+	type ModelFactory,
+	createModel,
 	Signal,
 	type ReadonlySignal,
 	untracked,
 };
+
+const DEVTOOLS_ENABLED =
+	typeof window !== "undefined" && !!window.__PREACT_SIGNALS_DEVTOOLS__;
 
 const HAS_PENDING_UPDATE = 1 << 0;
 const HAS_HOOK_STATE = 1 << 1;
@@ -56,16 +70,23 @@ let finishUpdate: (() => void) | undefined;
 
 function setCurrentUpdater(updater?: Effect) {
 	// end tracking for the current update:
-	if (finishUpdate) finishUpdate();
+	if (finishUpdate) {
+		const finish = finishUpdate;
+		finishUpdate = undefined;
+		finish();
+	}
 	// start tracking the new update:
 	finishUpdate = updater && updater._start();
 }
 
-function createUpdater(update: () => void) {
+function createUpdater(update: () => void, name: string) {
 	let updater!: Effect;
-	effect(function (this: Effect) {
-		updater = this;
-	});
+	effect(
+		function (this: Effect) {
+			updater = this;
+		},
+		{ name }
+	);
 	updater._callback = update;
 	return updater;
 }
@@ -89,6 +110,7 @@ function SignalValue(this: AugmentedComponent, { data }: { data: Signal }) {
 	// Store the props.data signal in another signal so that
 	// passing a new signal reference re-runs the text computed:
 	const currentSignal = useSignal(data);
+	currentSignal.name = "ReactiveDom";
 	currentSignal.value = data;
 
 	const [isText, s] = useMemo(() => {
@@ -151,7 +173,8 @@ function SignalValue(this: AugmentedComponent, { data }: { data: Signal }) {
 	// leaving them to the optimized path above.
 	return isText.value ? s.peek() : s.value;
 }
-SignalValue.displayName = "_st";
+
+SignalValue.displayName = "ReactiveTextNode";
 
 Object.defineProperties(Signal.prototype, {
 	constructor: { configurable: true, value: undefined },
@@ -159,7 +182,14 @@ Object.defineProperties(Signal.prototype, {
 	props: {
 		configurable: true,
 		get() {
-			return { data: this };
+			const s: Signal = this;
+			return {
+				data: {
+					get value() {
+						return s.value;
+					},
+				},
+			};
 		},
 	},
 	// Setting a VNode's _depth to 1 forces Preact to clone it before modifying:
@@ -191,11 +221,12 @@ hook(OptionsTypes.DIFF, (old, vnode) => {
 
 /** Set up Updater before rendering a component */
 hook(OptionsTypes.RENDER, (old, vnode) => {
+	old(vnode);
 	// Ignore the Fragment inserted by preact.createElement().
 	if (vnode.type !== Fragment) {
 		setCurrentUpdater();
 
-		let updater;
+		let updater: Effect | undefined;
 
 		let component = vnode.__c;
 		if (component) {
@@ -203,19 +234,27 @@ hook(OptionsTypes.RENDER, (old, vnode) => {
 
 			updater = component._updater;
 			if (updater === undefined) {
-				component._updater = updater = createUpdater(() => {
-					component._updateFlags |= HAS_PENDING_UPDATE;
-					component.setState({});
-				});
+				component._updater = updater = createUpdater(
+					createComponentUpdateCallback(component),
+					typeof vnode.type === "function"
+						? vnode.type.displayName || vnode.type.name
+						: ""
+				);
 			}
 		}
 
 		currentComponent = component;
 		setCurrentUpdater(updater);
 	}
-
-	old(vnode);
 });
+
+function createComponentUpdateCallback(component: AugmentedComponent) {
+	return function (this: Effect) {
+		if (DEVTOOLS_ENABLED) this._debugCallback?.call(this);
+		component._updateFlags |= HAS_PENDING_UPDATE;
+		component.setState({});
+	};
+}
 
 /** Finish current updater if a component errors */
 hook(OptionsTypes.CATCH_ERROR, (old, error, vnode, oldVNode) => {
@@ -236,21 +275,28 @@ hook(OptionsTypes.DIFFED, (old, vnode) => {
 	if (typeof vnode.type === "string" && (dom = vnode.__e as Element)) {
 		let props = vnode.__np;
 		let renderedProps = vnode.props;
-		if (props) {
-			let updaters = dom._updaters;
-			if (updaters) {
-				for (let prop in updaters) {
-					let updater = updaters[prop];
-					if (updater !== undefined && !(prop in props)) {
-						updater._dispose();
-						// @todo we could just always invoke _dispose() here
-						updaters[prop] = undefined;
-					}
+		let updaters = dom._updaters;
+		if (updaters) {
+			// Dispose updaters for props that are no longer bound to a signal.
+			// This must also run when the re-render carried no signal props at
+			// all (`vnode.__np` is undefined), otherwise the stale updater stays
+			// subscribed and keeps writing the old signal's values into the DOM.
+			for (let prop in updaters) {
+				let updater = updaters[prop];
+				if (updater !== undefined && (!props || !(prop in props))) {
+					updater._dispose();
+					// @todo we could just always invoke _dispose() here
+					updaters[prop] = undefined;
 				}
-			} else {
+			}
+		}
+
+		if (props) {
+			if (!updaters) {
 				updaters = {};
 				dom._updaters = updaters;
 			}
+
 			for (let prop in props) {
 				let updater = updaters[prop];
 				let signal = props[prop];
@@ -290,11 +336,17 @@ function createPropUpdater(
 			const value = changeSignal.value.value;
 			// If Preact just rendered this value, don't render it again:
 			if (props[prop] === value) return;
+			// Write the value back into the rendered props so that Preact's next
+			// diff compares against what is actually in the DOM. The Signal
+			// reference itself lives in vnode.__np and is restored into props by
+			// the UNMOUNT hook, so this never clobbers it.
 			props[prop] = value;
 			if (setAsProperty) {
 				// @ts-ignore-next-line silly
 				dom[prop] = value;
-			} else if (value) {
+				// Match Preact's attribute handling: data-* and aria-* attributes
+				// https://github.com/preactjs/preact/blob/main/src/diff/props.js#L132
+			} else if (value != null && (value !== false || prop[4] === "-")) {
 				dom.setAttribute(prop, value);
 			} else {
 				dom.removeAttribute(prop);
@@ -318,6 +370,17 @@ hook(OptionsTypes.UNMOUNT, (old, vnode: VNode) => {
 				}
 			}
 		}
+		// Restore Signal references into vnode.props so that, if this vnode
+		// instance is reused for a remount, the DIFF hook can re-detect the
+		// signal-bound props (they were replaced with peeked values during diff).
+		let signalProps = vnode.__np;
+		if (signalProps) {
+			let props = vnode.props;
+			for (let prop in signalProps) {
+				props[prop] = signalProps[prop];
+			}
+		}
+		vnode.__np = undefined;
 	} else {
 		let component = vnode.__c;
 		if (component) {
@@ -333,7 +396,7 @@ hook(OptionsTypes.UNMOUNT, (old, vnode: VNode) => {
 
 /** Mark components that use hook state so we can skip sCU optimization. */
 hook(OptionsTypes.HOOK, (old, component, index, type) => {
-	if (type < 3 || type === 9)
+	if (type < 3)
 		(component as AugmentedComponent)._updateFlags |= HAS_HOOK_STATE;
 	old(component, index, type);
 });
@@ -347,6 +410,9 @@ Component.prototype.shouldComponentUpdate = function (
 	props,
 	state
 ) {
+	// Suspended vnodes should always update:
+	if (this.__R) return true;
+
 	// @todo: Once preactjs/preact#3671 lands, this could just use `currentUpdater`:
 	const updater = this._updater;
 	const hasSignals = updater && updater._sources !== undefined;
@@ -449,7 +515,10 @@ function notifyDomUpdates(this: Effect) {
 	}
 }
 
-export function useSignalEffect(cb: () => void | (() => void)) {
+export function useSignalEffect(
+	cb: () => void | (() => void),
+	options?: EffectOptions
+) {
 	const callback = useRef(cb);
 	callback.current = cb;
 
@@ -457,8 +526,28 @@ export function useSignalEffect(cb: () => void | (() => void)) {
 		return effect(function (this: Effect) {
 			this._notify = notifyEffects;
 			return callback.current();
-		});
+		}, options);
 	}, []);
+}
+
+/** See comment in packages/core/src/index.ts on the same interface for an explanation */
+interface InternalModelConstructor<
+	TModel,
+	TArgs extends any[],
+> extends ModelConstructor<TModel, TArgs> {
+	(...args: TArgs): Model<TModel>;
+}
+
+export function useModel<TModel>(
+	factory: ModelConstructor<TModel, []> | (() => Model<TModel>)
+): Model<TModel> {
+	type InternalFactory =
+		| InternalModelConstructor<TModel, []>
+		| (() => Model<TModel>);
+
+	const inst = useMemo(() => (factory as InternalFactory)(), []);
+	useEffect(() => inst[Symbol.dispose], [inst]);
+	return inst;
 }
 
 /**

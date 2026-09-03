@@ -1,5 +1,225 @@
 # @preact/signals-react
 
+## 3.12.0
+
+### Minor Changes
+
+- [#968](https://github.com/preactjs/signals/pull/968) [`e83a981`](https://github.com/preactjs/signals/commit/e83a9815de29d661ebf843c2d34361f3ad4f9ed1) Thanks [@marvinhagemeister](https://github.com/marvinhagemeister)! - Add support for passing functions as fallback to `<For>` for lazy instantiation.
+
+  ```tsx
+  <For each={list} fallback={() => <p>No items</p>}>
+  	{item => <p>{item}</p>}
+  </For>
+  ```
+
+  This avoids eager evaluation of the fallback when the collection has items, which matters when you're dealing with signals.
+
+## 3.11.1
+
+### Patch Changes
+
+- [#966](https://github.com/preactjs/signals/pull/966) [`950b2b8`](https://github.com/preactjs/signals/commit/950b2b81cec0a30af6260a56ec7cc2f55def900e) Thanks [@BPScott](https://github.com/BPScott)! - Export the `ModelFactory` type from the Preact and React adapters.
+
+## 3.11.0
+
+### Minor Changes
+
+- [#954](https://github.com/preactjs/signals/pull/954) [`6b051b5`](https://github.com/preactjs/signals/commit/6b051b538622951a9bb10ba9655cb4ae12872f9a) Thanks [@marvinhagemeister](https://github.com/marvinhagemeister)! - Add support for passing functions as fallback to `<Show>` for lazy instantiation.
+
+  ```tsx
+  <Show when={toggle} fallback={() => <p>I'm lazy</p>}>
+  	<p>foo</p>
+  </Show>
+  ```
+
+  This avoids eager evaluation of whatever is passed to fallback which matters when you're dealing with signals.
+
+## 3.10.3
+
+### Patch Changes
+
+- [#950](https://github.com/preactjs/signals/pull/950) [`76f9155`](https://github.com/preactjs/signals/commit/76f9155815fe9f2918f98018984f7ec959cc0aea) Thanks [@joeyTedeschi](https://github.com/joeyTedeschi)! - Allow `<For>` to accept readonly arrays and signals containing readonly arrays.
+
+- Updated dependencies [[`2910fbf`](https://github.com/preactjs/signals/commit/2910fbf302ab2d914ff055f5159a0a75a6b86c49), [`d40746b`](https://github.com/preactjs/signals/commit/d40746be3c7575209d6325ff250c91dd72d6ef18)]:
+  - @preact/signals-core@1.14.4
+
+## 3.10.2
+
+### Patch Changes
+
+- [#942](https://github.com/preactjs/signals/pull/942) [`e76780c`](https://github.com/preactjs/signals/commit/e76780c7800febc10f57d15cd34166c2f19c65d0) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Fix stale `<For>` render-prop indexes after removals/reorders by making each cached item's index reactive (a per-item signal) instead of a frozen prop. Cached children are reused and re-render with the new index rather than being recreated, so DOM/component identity is preserved.
+
+- Updated dependencies [[`beb84c1`](https://github.com/preactjs/signals/commit/beb84c19d67c54d85e68ac033ac797b5792d1f8f)]:
+  - @preact/signals-core@1.14.3
+
+## 3.10.1
+
+### Patch Changes
+
+- [#918](https://github.com/preactjs/signals/pull/918) [`8732619`](https://github.com/preactjs/signals/commit/873261927b493535cc5e205894b4552b4d2bf7ae) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Update `live-signal` within an effect to avoid the `cannot update component while rendering other component` error in react.
+
+- Updated dependencies [[`054afc1`](https://github.com/preactjs/signals/commit/054afc1c7deef23b48df74941c9ab57235dc894e)]:
+  - @preact/signals-core@1.14.2
+
+## 3.10.0
+
+### Minor Changes
+
+- [#907](https://github.com/preactjs/signals/pull/907) [`904a879`](https://github.com/preactjs/signals/commit/904a8793a13021c738312809425dda8d54738510) Thanks [@jbalsas](https://github.com/jbalsas)! - Add optional `getKey` prop to `<For>` component for stable list reconciliation. When provided, `getKey` generates stable keys for the internal `<Item>` wrapper, fixing incorrect DOM reuse when items are removed or reordered.
+
+## 3.9.1
+
+### Patch Changes
+
+- [#888](https://github.com/preactjs/signals/pull/888) [`d3c419d`](https://github.com/preactjs/signals/commit/d3c419d735492e164434f5486453da82660109b0) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Fix infinite recursion when tools like Storybook traverse Signal props
+
+- Updated dependencies [[`308c921`](https://github.com/preactjs/signals/commit/308c921bbf189dd72861ef587f5e559d16299b68)]:
+  - @preact/signals-core@1.14.0
+
+## 3.9.0
+
+### Minor Changes
+
+- [#878](https://github.com/preactjs/signals/pull/878) [`4aa565b`](https://github.com/preactjs/signals/commit/4aa565b3b668100b9c7ce09805da67cab8e3f5b2) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Support returning a plain array in the `when` of a `For` component
+
+## 3.8.0
+
+### Minor Changes
+
+- [#861](https://github.com/preactjs/signals/pull/861) [`5794b04`](https://github.com/preactjs/signals/commit/5794b0418ef6a04810ade08e2a8237c66e61ed4b) Thanks [@andrewiggins](https://github.com/andrewiggins)! - Add `useModel` hook for using Models in components
+
+  The new `useModel` hook provides a convenient way to use Models (created with `createModel`) within React and Preact components. It handles:
+  - Creating the model instance lazily on first render
+  - Maintaining the same instance across re-renders
+  - Automatically disposing the model when the component unmounts
+
+  ```jsx
+  import { createModel, signal } from "@preact/signals-core";
+  import { useModel } from "@preact/signals-react"; // or "@preact/signals"
+
+  const CountModel = createModel(() => ({
+  	count: signal(0),
+  	increment() {
+  		this.count.value++;
+  	},
+  }));
+
+  function Counter() {
+  	const model = useModel(CountModel);
+  	return <button onClick={() => model.increment()}>{model.count}</button>;
+  }
+  ```
+
+  For models that require constructor arguments, wrap in a factory function:
+
+  ```jsx
+  const CountModel = createModel((initialCount: number) => ({
+    count: signal(initialCount),
+  }));
+
+  function Counter() {
+    const model = useModel(() => new CountModel(5));
+    return <div>{model.count}</div>;
+  }
+  ```
+
+### Patch Changes
+
+- Updated dependencies [[`19ac39b`](https://github.com/preactjs/signals/commit/19ac39bb4a7a3273090753a50a58efb717f5553d)]:
+  - @preact/signals-core@1.13.0
+
+## 3.7.0
+
+### Minor Changes
+
+- [#839](https://github.com/preactjs/signals/pull/839) [`18969fa`](https://github.com/preactjs/signals/commit/18969fada30397f537828af9e839acc7348f9684) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Add `componentName` to `useSignals` for debugging
+
+### Patch Changes
+
+- [#836](https://github.com/preactjs/signals/pull/836) [`ac5032e`](https://github.com/preactjs/signals/commit/ac5032e63000cdb0bf84e20a1b44c161788a1607) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Ensure that the `For` and `Show` component have display-names
+
+## 3.6.2
+
+### Patch Changes
+
+- [#827](https://github.com/preactjs/signals/pull/827) [`f17889b`](https://github.com/preactjs/signals/commit/f17889b6d46448205d9485b8d5e691fbe05cd404) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Add mangle entry for \_debugCallback
+
+- Updated dependencies [[`f17889b`](https://github.com/preactjs/signals/commit/f17889b6d46448205d9485b8d5e691fbe05cd404)]:
+  - @preact/signals-core@1.12.2
+
+## 3.6.1
+
+### Patch Changes
+
+- [#795](https://github.com/preactjs/signals/pull/795) [`80712b1`](https://github.com/preactjs/signals/commit/80712b188b11b43efe9e95e09b78f57f0551f6eb) Thanks [@rschristian](https://github.com/rschristian)! - Widen utility component types to accept ComponentChildren/ReactNodes as children and fallbacks
+
+- [#800](https://github.com/preactjs/signals/pull/800) [`bc5b573`](https://github.com/preactjs/signals/commit/bc5b573d3e24d1da2b1f91c051f70e57d7be6bc7) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Allow useLiveSignal to accept plain values
+
+## 3.6.0
+
+### Minor Changes
+
+- [#796](https://github.com/preactjs/signals/pull/796) [`035e8af`](https://github.com/preactjs/signals/commit/035e8afc3820632229b8ef6a4ba9adb698a84858) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Revert the changes to `useComputed`, sincere apologies for the inconvenience we've discussed this at length and are going to side on the perf side.
+
+## 3.5.0
+
+### Minor Changes
+
+- [#792](https://github.com/preactjs/signals/pull/792) [`95dcf41`](https://github.com/preactjs/signals/commit/95dcf41c95baa5d9c6aa8f94c7592722c0cefc3f) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Allow the `when` property of `Show` to be a function so not everything has to be transformed into a boolean computed
+
+### Patch Changes
+
+- [#790](https://github.com/preactjs/signals/pull/790) [`4b143a7`](https://github.com/preactjs/signals/commit/4b143a7164d58edda05a23a482f06afc20543234) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Ensure the cached and non-cached shape is the same
+
+- [#791](https://github.com/preactjs/signals/pull/791) [`358a758`](https://github.com/preactjs/signals/commit/358a7585a27deff6cf0b804f5f02739b893c7a02) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Prevent `For` cache from expanding infinitely
+
+## 3.4.0
+
+### Minor Changes
+
+- [#777](https://github.com/preactjs/signals/pull/777) [`d31738f`](https://github.com/preactjs/signals/commit/d31738f646fda6bd00113b8e6e1dfae46e14f08e) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Revert the changes to `useComputed`, sincere apologies for the inconvenience we've discussed this at length and are going to side on the perf side.
+
+### Patch Changes
+
+- [#783](https://github.com/preactjs/signals/pull/783) [`86575b4`](https://github.com/preactjs/signals/commit/86575b41ec097c3ecdefc7b54a4cabfbe23f7984) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Ensure `For` and `Show` account for nested reactivity
+
+## 3.3.1
+
+### Patch Changes
+
+- [#757](https://github.com/preactjs/signals/pull/757) [`18f1aa1`](https://github.com/preactjs/signals/commit/18f1aa10aed3a7876a128b6613417194f08b0fb5) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Reflect logic from https://github.com/preactjs/signals/pull/754 in react
+
+## 3.3.0
+
+### Minor Changes
+
+- [#681](https://github.com/preactjs/signals/pull/681) [`6cc7005`](https://github.com/preactjs/signals/commit/6cc700595278d241f276c40dd0ecf162c9e432d8) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Allow for naming your singals/computeds/effects
+
+### Patch Changes
+
+- Updated dependencies [[`6cc7005`](https://github.com/preactjs/signals/commit/6cc700595278d241f276c40dd0ecf162c9e432d8)]:
+  - @preact/signals-core@1.12.0
+
+## 3.2.1
+
+### Patch Changes
+
+- [#711](https://github.com/preactjs/signals/pull/711) [`4b96199`](https://github.com/preactjs/signals/commit/4b9619999f9133398a2bd25ae7dd5300d71ad2ac) Thanks [@calebeby](https://github.com/calebeby)! - Narrow types for Show utility, the callback is truthy by design
+
+- Updated dependencies [[`4045d2d`](https://github.com/preactjs/signals/commit/4045d2d86b720546848d5163d5b683792c0a5af3)]:
+  - @preact/signals-core@1.11.0
+
+## 3.2.0
+
+### Minor Changes
+
+- [#634](https://github.com/preactjs/signals/pull/634) [`62bed44`](https://github.com/preactjs/signals/commit/62bed44b0f298ac0097060289bfecd73f030b146) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Add an option to specify a watched/unwatched callback to a signal
+
+### Patch Changes
+
+- Updated dependencies [[`587e702`](https://github.com/preactjs/signals/commit/587e702f8db9a8e67fe2cdf8dda0a4bffe5fc195), [`62bed44`](https://github.com/preactjs/signals/commit/62bed44b0f298ac0097060289bfecd73f030b146)]:
+  - @preact/signals-core@1.9.0
+
 ## 3.1.1
 
 ### Patch Changes

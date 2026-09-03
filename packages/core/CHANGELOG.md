@@ -1,5 +1,153 @@
 # @preact/signals-core
 
+## 1.14.4
+
+### Patch Changes
+
+- [#947](https://github.com/preactjs/signals/pull/947) [`2910fbf`](https://github.com/preactjs/signals/commit/2910fbf302ab2d914ff055f5159a0a75a6b86c49) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Fix computeds returning stale values after a batch reverts a signal to its original value.
+
+  Reconciling a reverted batch write used to roll the signal's version number back, breaking version monotonicity. A lazy computed that read the signal during the batch had already observed the intermediate version, so a later write could re-mint that same version number for a different value and the computed would treat it as unchanged forever. Subscriber nodes that saw the pre-batch version are now fast-forwarded instead, keeping the no-op skip optimization without ever reusing version numbers.
+
+- [#945](https://github.com/preactjs/signals/pull/945) [`d40746b`](https://github.com/preactjs/signals/commit/d40746be3c7575209d6325ff250c91dd72d6ef18) Thanks [@andrewiggins](https://github.com/andrewiggins)! - Prevent model effect capture while creating effects inside `untracked()` and `action()` callbacks.
+
+  If you create an `effect()` inside an `untracked()` callback within a `createModel()` factory, that effect is no longer disposed when the model is disposed. Use the disposer returned by `effect()` to clean it up manually.
+
+## 1.14.3
+
+### Patch Changes
+
+- [#937](https://github.com/preactjs/signals/pull/937) [`beb84c1`](https://github.com/preactjs/signals/commit/beb84c19d67c54d85e68ac033ac797b5792d1f8f) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Optimize bundle size
+
+## 1.14.2
+
+### Patch Changes
+
+- [#915](https://github.com/preactjs/signals/pull/915) [`054afc1`](https://github.com/preactjs/signals/commit/054afc1c7deef23b48df74941c9ab57235dc894e) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Shave some bytes by using untracked to implement peek
+
+## 1.14.1
+
+### Patch Changes
+
+- [#906](https://github.com/preactjs/signals/pull/906) [`0c65390`](https://github.com/preactjs/signals/commit/0c6539096057d991679f49baf68dd97f7121f322) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Wrap nested object methods returned from createModel so composed models keep action batching semantics without manual action wrappers.
+
+- [#911](https://github.com/preactjs/signals/pull/911) [`6c17923`](https://github.com/preactjs/signals/commit/6c17923a0a7d822621702022d96b046c6758f6dc) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Avoid hard-requiring `ESNext.Disposable` in consumer tsconfigs for `Model` and `effect()` types.
+
+## 1.14.0
+
+### Minor Changes
+
+- [#891](https://github.com/preactjs/signals/pull/891) [`308c921`](https://github.com/preactjs/signals/commit/308c921bbf189dd72861ef587f5e559d16299b68) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Prevent batches where a signal goes from A --> B --> A from triggering dependent updates, a computed/effect should not re-run when the dependencies in a batched update amount to an equal value.
+
+## 1.13.0
+
+### Minor Changes
+
+- [#812](https://github.com/preactjs/signals/pull/812) [`19ac39b`](https://github.com/preactjs/signals/commit/19ac39bb4a7a3273090753a50a58efb717f5553d) Thanks [@andrewiggins](https://github.com/andrewiggins)! - Add `createModel` and `action` to signals core package
+
+  **`createModel`** provides a structured way to create reactive model classes that encapsulate signals, computed values, and actions:
+
+  ```js
+  const CounterModel = createModel((initialCount = 0) => {
+  	const count = signal(initialCount);
+  	const doubled = computed(() => count.value * 2);
+
+  	effect(() => {
+  		console.log("Count changed:", count.value);
+  	});
+
+  	return {
+  		count,
+  		doubled,
+  		increment() {
+  			count.value++;
+  		},
+  	};
+  });
+
+  const counter = new CounterModel(5);
+  counter.increment(); // Updates are automatically batched
+  counter[Symbol.dispose](); // Cleans up all effects
+  ```
+
+  Key features:
+  - Factory functions can accept arguments for initialization
+  - All methods are automatically wrapped as actions (batched & untracked)
+  - Effects created during model construction are captured and disposed when the model is disposed via `Symbol.dispose`
+  - TypeScript validates that models only contain signals, actions, or nested objects with signals/actions
+
+  **`action`** is a helper that wraps a function to run batched and untracked:
+
+  ```js
+  const updateAll = action(items => {
+  	items.forEach(item => item.value++);
+  }); // All updates batched into single notification
+  ```
+
+## 1.12.2
+
+### Patch Changes
+
+- [#827](https://github.com/preactjs/signals/pull/827) [`f17889b`](https://github.com/preactjs/signals/commit/f17889b6d46448205d9485b8d5e691fbe05cd404) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Add mangle entry for \_debugCallback
+
+## 1.12.1
+
+### Patch Changes
+
+- [#747](https://github.com/preactjs/signals/pull/747) [`57bc903`](https://github.com/preactjs/signals/commit/57bc9033422b308d0e9c4204c037fd339011dd6f) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Remove internal annotation as it confused TS
+
+## 1.12.0
+
+### Minor Changes
+
+- [#681](https://github.com/preactjs/signals/pull/681) [`6cc7005`](https://github.com/preactjs/signals/commit/6cc700595278d241f276c40dd0ecf162c9e432d8) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Allow for naming your singals/computeds/effects
+
+## 1.11.0
+
+### Minor Changes
+
+- [#706](https://github.com/preactjs/signals/pull/706) [`4045d2d`](https://github.com/preactjs/signals/commit/4045d2d86b720546848d5163d5b683792c0a5af3) Thanks [@marvinhagemeister](https://github.com/marvinhagemeister)! - feat: support disposing `effect()` with resource management
+
+  This allows `effect()`'s to be disposed with the new `using` keyword from [the explicit resource management proposal](https://github.com/tc39/proposal-explicit-resource-management).
+
+  Whenever an effect goes out of scope the `Symbol.dispose` function is called automatically.
+
+  ```js
+  const count = signal(0);
+
+  function doSomething() {
+  	// The `using` keyword calls dispose at the end of
+  	// this function scope
+  	using _ = effect(() => {
+  		console.log(count.value);
+  		return () => console.log("disposed");
+  	});
+
+  	console.log("hey");
+  }
+
+  doSomething();
+  // Logs:
+  //  0
+  //  hey
+  //  disposed
+  ```
+
+## 1.10.0
+
+### Minor Changes
+
+- [#697](https://github.com/preactjs/signals/pull/697) [`5e7a167`](https://github.com/preactjs/signals/commit/5e7a167acd7bf605929a2577c9217fa834f3c115) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Publicly expose `dispose()` on an effect callback
+
+## 1.9.0
+
+### Minor Changes
+
+- [#634](https://github.com/preactjs/signals/pull/634) [`62bed44`](https://github.com/preactjs/signals/commit/62bed44b0f298ac0097060289bfecd73f030b146) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Add an option to specify a watched/unwatched callback to a signal
+
+### Patch Changes
+
+- [#688](https://github.com/preactjs/signals/pull/688) [`587e702`](https://github.com/preactjs/signals/commit/587e702f8db9a8e67fe2cdf8dda0a4bffe5fc195) Thanks [@JoviDeCroock](https://github.com/JoviDeCroock)! - Loosen up types for `watched` and `unwatched`
+
 ## 1.8.0
 
 ### Minor Changes

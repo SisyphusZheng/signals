@@ -4,6 +4,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 import { signal } from "@preact/signals-react";
 import { createElement } from "react";
 import * as ReactRouter from "react-router-dom";
+import { describe, it, beforeEach, afterEach, expect } from "vitest";
 
 import { act, checkHangingAct, createRoot, Root } from "../shared/utils";
 
@@ -17,9 +18,9 @@ const Routes = ReactRouter.Routes
 const Route = ReactRouter.Routes
 	? ReactRouter.Route
 	: // react-router-dom v5 requires the element prop to be passed as children.
-	  ({ element, ...props }: any) => (
+		({ element, ...props }: any) => (
 			<ReactRouter.Route {...props}>{element}</ReactRouter.Route>
-	  );
+		);
 
 describe("@preact/signals-react", () => {
 	let scratch: HTMLDivElement;

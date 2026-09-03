@@ -11,6 +11,11 @@ import {
 	computed,
 	batch,
 	effect,
+	action,
+	type Model,
+	type ModelConstructor,
+	type ModelFactory,
+	createModel,
 	Signal,
 	type ReadonlySignal,
 	untracked,
@@ -20,6 +25,7 @@ import {
 	useSignal,
 	useComputed,
 	useSignalEffect,
+	useModel,
 } from "@preact/signals-react/runtime";
 
 export {
@@ -27,11 +33,17 @@ export {
 	computed,
 	batch,
 	effect,
+	action,
+	type Model,
+	type ModelConstructor,
+	type ModelFactory,
+	createModel,
 	Signal,
 	type ReadonlySignal,
 	useSignal,
 	useComputed,
 	useSignalEffect,
+	useModel,
 	untracked,
 };
 

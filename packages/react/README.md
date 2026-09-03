@@ -7,21 +7,26 @@ Signals is a performant state management library with two primary goals:
 
 Read the [announcement post](https://preactjs.com/blog/introducing-signals/) to learn more about which problems signals solves and how it came to be.
 
-## Installation:
-
-```sh
-npm install @preact/signals-react
-```
-
-- [Guide / API](../../README.md#guide--api)
-  - [`signal(initialValue)`](../../README.md#signalinitialvalue)
-    - [`signal.peek()`](../../README.md#signalpeek)
-  - [`computed(fn)`](../../README.md#computedfn)
-  - [`effect(fn)`](../../README.md#effectfn)
-  - [`batch(fn)`](../../README.md#batchfn)
-  - [`untracked(fn)`](../../README.md#untrackedfn)
+- [Core API](../core/README.md#guide--api)
+  - [`signal(initialValue)`](../core/README.md#signalinitialvalue)
+    - [`signal.peek()`](../core/README.md#signalpeek)
+  - [`computed(fn)`](../core/README.md#computedfn)
+  - [`effect(fn)`](../core/README.md#effectfn)
+  - [`batch(fn)`](../core/README.md#batchfn)
+  - [`untracked(fn)`](../core/README.md#untrackedfn)
 - [React Integration](#react-integration)
+  - [Babel Transform](#babel-transform)
+  - [`useSignals` hook](#usesignals-hook)
   - [Hooks](#hooks)
+  - [Using signals with React's SSR APIs](#using-signals-with-reacts-ssr-apis)
+  - [Rendering optimizations](#rendering-optimizations)
+  - [Utility Components and Hooks](#utility-components-and-hooks)
+    - [Show Component](#show-component)
+    - [For Component](#for-component)
+    - [Additional Hooks](#additional-hooks)
+      - [`useLiveSignal`](#uselivesignal)
+      - [`useSignalRef`](#usesignalref)
+  - [Limitations](#limitations)
 - [License](#license)
 
 ## React Integration
@@ -98,6 +103,29 @@ function Counter() {
 }
 ```
 
+#### `useModel`
+
+Use `useModel` to create a model instance once per component and automatically dispose it when the component unmounts.
+
+```js
+import { createModel, signal, useModel } from "@preact/signals-react";
+
+const CounterModel = createModel(() => ({
+	count: signal(0),
+	increment() {
+		this.count.value++;
+	},
+}));
+
+function Counter() {
+	const model = useModel(CounterModel);
+
+	return <button onClick={() => model.increment()}>{model.count.value}</button>;
+}
+```
+
+If your model needs constructor arguments, pass a factory function to `useModel` that creates the instance.
+
 ### Using signals with React's SSR APIs
 
 Components rendered using SSR APIs (e.g. `renderToString`) in a server environment (i.e. an environment without a global `window` object) will not track signals used during render. Components generally don't rerender when using SSR APIs so tracking signal usage is useless since changing these signals can't trigger a rerender.
@@ -132,11 +160,11 @@ To opt into this optimization, simply pass the signal directly instead of access
 > **Note**
 > The content is wrapped in a React Fragment due to React 18's newer, more strict children types.
 
-## Utility Components and Hooks
+### Utility Components and Hooks
 
 The `@preact/signals-react/utils` package provides additional utility components and hooks to make working with signals even easier.
 
-### Show Component
+#### Show Component
 
 The `Show` component provides a declarative way to conditionally render content based on a signal's value.
 
@@ -160,7 +188,7 @@ function App() {
 }
 ```
 
-### For Component
+#### For Component
 
 The `For` component helps you render lists from signal arrays with automatic caching of rendered items.
 
@@ -179,9 +207,9 @@ function App() {
 }
 ```
 
-### Additional Hooks
+#### Additional Hooks
 
-#### useLiveSignal
+##### useLiveSignal
 
 The `useLiveSignal` hook allows you to create a local signal that stays synchronized with an external signal.
 
@@ -197,7 +225,7 @@ function Component() {
 }
 ```
 
-#### useSignalRef
+##### useSignalRef
 
 The `useSignalRef` hook creates a signal that behaves like a React ref with a `.current` property.
 
@@ -210,7 +238,7 @@ function Component() {
 }
 ```
 
-## Limitations
+### Limitations
 
 This version of React integration does not support passing signals as DOM attributes. Support for this may be added at a later date.
 

@@ -46,6 +46,7 @@ function endBatch() {
 
 	let error: unknown;
 	let hasError = false;
+	reconcileBatchSnapshots();
 
 	while (batchedEffect !== undefined) {
 		let effect: Effect | undefined = batchedEffect;
@@ -95,6 +96,7 @@ function batch<T>(fn: () => T): T {
 	if (batchDepth > 0) {
 		return fn();
 	}
+	currentBatchSnapshotVersion = ++batchSnapshotVersion;
 	/*@__INLINE__**/ startBatch();
 	try {
 		return fn();
@@ -106,20 +108,35 @@ function batch<T>(fn: () => T): T {
 // Currently evaluated computed or effect.
 let evalContext: Computed | Effect | undefined = undefined;
 
+// Effects captured while constructing a model instance.
+let capturedEffects: Effect[] | undefined;
+
 /**
  * Run a callback function that can access signal values without
  * subscribing to the signal updates.
+ *
+ * When called inside a `createModel` factory, this also suppresses
+ * model-owned effect capture. Effects created inside the callback will not
+ * be owned by the surrounding model and must be disposed manually. Nested
+ * `createModel` calls inside the callback still capture their own effects.
  *
  * @param fn The callback function.
  * @returns The value returned by the callback.
  */
 function untracked<T>(fn: () => T): T {
 	const prevContext = evalContext;
+	const prevCapturedEffects = capturedEffects;
+
 	evalContext = undefined;
+	// Model effect capture is another kind of ambient tracking. Suppress it in
+	// untracked callbacks while still allowing nested createModel() calls to
+	// establish their own capture scope.
+	capturedEffects = undefined;
 	try {
 		return fn();
 	} finally {
 		evalContext = prevContext;
+		capturedEffects = prevCapturedEffects;
 	}
 }
 
@@ -128,9 +145,65 @@ let batchedEffect: Effect | undefined = undefined;
 let batchDepth = 0;
 let batchIteration = 0;
 
+type BatchSnapshot = {
+	_source: Signal;
+	_value: unknown;
+	_version: number;
+	_next?: BatchSnapshot;
+};
+
+let batchSnapshotVersion = 0;
+let currentBatchSnapshotVersion = 0;
+let batchSnapshots: BatchSnapshot | undefined = undefined;
+
 // A global version number for signals, used for fast-pathing repeated
 // computed.peek()/computed.value calls when nothing has changed globally.
 let globalVersion = 0;
+
+function recordBatchSnapshot(source: Signal) {
+	// Only capture writes during the user-visible batch callback, not during effect flush.
+	if (batchDepth === 0 || batchIteration !== 0) {
+		return;
+	}
+
+	if (source._batchSnapshotVersion !== currentBatchSnapshotVersion) {
+		source._batchSnapshotVersion = currentBatchSnapshotVersion;
+		batchSnapshots = {
+			_source: source,
+			_value: source._value,
+			_version: source._version,
+			_next: batchSnapshots,
+		};
+	}
+}
+
+function reconcileBatchSnapshots() {
+	let snapshots = batchSnapshots;
+	batchSnapshots = undefined;
+
+	while (snapshots !== undefined) {
+		const source = snapshots._source;
+		if (source._value === snapshots._value) {
+			// The value was reverted to its pre-batch state. Version numbers must
+			// stay monotonic: a lazy computed may have observed an intermediate
+			// version during the batch, and rolling the version back would let a
+			// future write re-mint that observed number for a different value,
+			// making the computed treat it as unchanged forever. Instead,
+			// fast-forward subscribers that last saw the pre-batch version so
+			// they skip recomputing for the no-op change.
+			for (
+				let node = source._targets;
+				node !== undefined;
+				node = node._nextTarget
+			) {
+				if (node._version === snapshots._version) {
+					node._version = source._version;
+				}
+			}
+		}
+		snapshots = snapshots._next;
+	}
+}
 
 function addDependency(signal: Signal): Node | undefined {
 	if (evalContext === undefined) {
@@ -212,16 +285,18 @@ function addDependency(signal: Signal): Node | undefined {
 	return undefined;
 }
 
+//#region Signal
+
 /**
  * The base class for plain and computed signals.
  */
-// @ts-ignore: "Cannot redeclare exported variable 'Signal'."
 //
 // A function with the same name is defined later, so we need to ignore TypeScript's
 // warning about a redeclared variable.
 //
 // The class is declared here, but later implemented with ES5-style prototypes.
 // This enables better control of the transpiled output size.
+// @ts-ignore: "Cannot redeclare exported variable 'Signal'."
 declare class Signal<T = any> {
 	/** @internal */
 	_value: unknown;
@@ -238,6 +313,9 @@ declare class Signal<T = any> {
 
 	/** @internal */
 	_targets?: Node;
+
+	/** @internal */
+	_batchSnapshotVersion: number;
 
 	constructor(value?: T, options?: SignalOptions<T>);
 
@@ -258,6 +336,8 @@ declare class Signal<T = any> {
 
 	subscribe(fn: (value: T) => void): () => void;
 
+	name?: string;
+
 	valueOf(): T;
 
 	toString(): string;
@@ -273,25 +353,27 @@ declare class Signal<T = any> {
 }
 
 export interface SignalOptions<T = any> {
-	watched: (this: Signal<T>) => void;
-	unwatched: (this: Signal<T>) => void;
+	watched?: (this: Signal<T>) => void;
+	unwatched?: (this: Signal<T>) => void;
+	name?: string;
 }
 
 /** @internal */
-// @ts-ignore: "Cannot redeclare exported variable 'Signal'."
-//
 // A class with the same name has already been declared, so we need to ignore
 // TypeScript's warning about a redeclared variable.
 //
 // The previously declared class is implemented here with ES5-style prototypes.
 // This enables better control of the transpiled output size.
+// @ts-ignore: "Cannot redeclare exported variable 'Signal'."
 function Signal(this: Signal, value?: unknown, options?: SignalOptions) {
 	this._value = value;
 	this._version = 0;
 	this._node = undefined;
 	this._targets = undefined;
+	this._batchSnapshotVersion = 0;
 	this._watched = options?.watched;
 	this._unwatched = options?.unwatched;
+	this.name = options?.name;
 }
 
 Signal.prototype.brand = BRAND_SYMBOL;
@@ -343,17 +425,13 @@ Signal.prototype._unsubscribe = function (node) {
 };
 
 Signal.prototype.subscribe = function (fn) {
-	return effect(() => {
-		const value = this.value;
-
-		const prevContext = evalContext;
-		evalContext = undefined;
-		try {
-			fn(value);
-		} finally {
-			evalContext = prevContext;
-		}
-	});
+	return effect(
+		() => {
+			const value = this.value;
+			untracked(() => fn(value));
+		},
+		{ name: "sub" }
+	);
 };
 
 Signal.prototype.valueOf = function () {
@@ -369,13 +447,7 @@ Signal.prototype.toJSON = function () {
 };
 
 Signal.prototype.peek = function () {
-	const prevContext = evalContext;
-	evalContext = undefined;
-	try {
-		return this.value;
-	} finally {
-		evalContext = prevContext;
-	}
+	return untracked(() => this.value);
 };
 
 Object.defineProperty(Signal.prototype, "value", {
@@ -392,6 +464,7 @@ Object.defineProperty(Signal.prototype, "value", {
 				throw new Error("Cycle detected");
 			}
 
+			recordBatchSnapshot(this);
 			this._value = value;
 			this._version++;
 			globalVersion++;
@@ -424,6 +497,10 @@ export function signal<T>(value?: T, options?: SignalOptions<T>): Signal<T> {
 	return new Signal(value, options);
 }
 
+//#endregion Signal
+
+//#region Computed
+
 function needsToRecompute(target: Computed | Effect): boolean {
 	// Check the dependencies for changed values. The dependency list is already
 	// in order of use. Therefore if multiple dependencies have changed values, only
@@ -433,12 +510,16 @@ function needsToRecompute(target: Computed | Effect): boolean {
 		node !== undefined;
 		node = node._nextSource
 	) {
-		// If there's a new version of the dependency before or after refreshing,
-		// or the dependency has something blocking it from refreshing at all (e.g. a
-		// dependency cycle), then we need to recompute.
 		if (
+			// If the dependency has definitely been updated since its version number
+			// was observed, then we need to recompute. This first check is not strictly
+			// necessary for correctness, but allows us to skip the refresh call if the
+			// dependency has already been updated.
 			node._source._version !== node._version ||
+			// Refresh the dependency. If there's something blocking the refresh (e.g. a
+			// dependency cycle), then we need to recompute.
 			!node._source._refresh() ||
+			// If the dependency got a new version after the refresh, then we need to recompute.
 			node._source._version !== node._version
 		) {
 			return true;
@@ -483,7 +564,7 @@ function prepareSources(target: Computed | Effect) {
 
 function cleanupSources(target: Computed | Effect) {
 	let node = target._sources;
-	let head = undefined;
+	let head: Node | undefined = undefined;
 
 	/**
 	 * At this point 'target._sources' points to the tail of the doubly-linked list.
@@ -535,6 +616,9 @@ function cleanupSources(target: Computed | Effect) {
 	target._sources = head;
 }
 
+/**
+ * The base class for computed signals.
+ */
 declare class Computed<T = any> extends Signal<T> {
 	_fn: () => T;
 	_sources?: Node;
@@ -547,15 +631,14 @@ declare class Computed<T = any> extends Signal<T> {
 	get value(): T;
 }
 
+/** @internal */
 function Computed(this: Computed, fn: () => unknown, options?: SignalOptions) {
-	Signal.call(this, undefined);
+	Signal.call(this, undefined, options);
 
 	this._fn = fn;
 	this._sources = undefined;
 	this._globalVersion = globalVersion - 1;
 	this._flags = OUTDATED;
-	this._watched = options?.watched;
-	this._unwatched = options?.unwatched;
 }
 
 Computed.prototype = new Signal() as Computed;
@@ -712,6 +795,10 @@ function computed<T>(
 	return new Computed(fn, options);
 }
 
+//#endregion Computed
+
+//#region Effect
+
 function cleanupEffect(effect: Effect) {
 	const cleanup = effect._cleanup;
 	effect._cleanup = undefined;
@@ -764,29 +851,57 @@ function endEffect(this: Effect, prevContext?: Computed | Effect) {
 	endBatch();
 }
 
-type EffectFn = () => void | (() => void);
+type EffectFn =
+	| ((this: { dispose: () => void }) => void | (() => void))
+	| (() => void | (() => void));
 
+// Avoid hard-requiring the ESNext.Disposable lib in consuming tsconfigs.
+// When `Symbol.dispose` is available, this becomes a symbol-keyed disposer type.
+type DisposeSymbol = typeof Symbol extends { readonly dispose: infer TDispose }
+	? TDispose
+	: never;
+type DisposableLike = {
+	[K in DisposeSymbol & PropertyKey]: () => void;
+};
+type DisposeFn = (() => void) & DisposableLike;
+
+/**
+ * The base class for reactive effects.
+ */
 declare class Effect {
 	_fn?: EffectFn;
 	_cleanup?: () => void;
 	_sources?: Node;
 	_nextBatchedEffect?: Effect;
 	_flags: number;
+	_debugCallback?: () => void;
+	name?: string;
 
-	constructor(fn: EffectFn);
+	constructor(fn: EffectFn, options?: EffectOptions);
 
 	_callback(): void;
 	_start(): () => void;
 	_notify(): void;
 	_dispose(): void;
+	dispose(): void;
 }
 
-function Effect(this: Effect, fn: EffectFn) {
+export interface EffectOptions {
+	name?: string;
+}
+
+/** @internal */
+function Effect(this: Effect, fn: EffectFn, options?: EffectOptions) {
 	this._fn = fn;
 	this._cleanup = undefined;
 	this._sources = undefined;
 	this._nextBatchedEffect = undefined;
 	this._flags = TRACKING;
+	this.name = options?.name;
+
+	if (capturedEffects) {
+		capturedEffects.push(this);
+	}
 }
 
 Effect.prototype._callback = function () {
@@ -835,6 +950,9 @@ Effect.prototype._dispose = function () {
 	}
 };
 
+Effect.prototype.dispose = function () {
+	this._dispose();
+};
 /**
  * Create an effect to run arbitrary code in response to signal changes.
  *
@@ -848,8 +966,8 @@ Effect.prototype._dispose = function () {
  * @param fn The effect callback.
  * @returns A function for disposing the effect.
  */
-function effect(fn: EffectFn): () => void {
-	const effect = new Effect(fn);
+function effect(fn: EffectFn, options?: EffectOptions): DisposeFn {
+	const effect = new Effect(fn, options);
 	try {
 		effect._callback();
 	} catch (err) {
@@ -858,7 +976,163 @@ function effect(fn: EffectFn): () => void {
 	}
 	// Return a bound function instead of a wrapper like `() => effect._dispose()`,
 	// because bound functions seem to be just as fast and take up a lot less memory.
-	return effect._dispose.bind(effect);
+	const dispose = effect._dispose.bind(effect);
+	(dispose as any)[Symbol.dispose] = dispose;
+	return dispose as DisposeFn;
 }
 
-export { computed, effect, batch, untracked, Signal, ReadonlySignal };
+//#endregion Effect
+
+//#region Action
+
+function action<TArgs extends unknown[], TReturn>(
+	fn: (...args: TArgs) => TReturn
+): (...args: TArgs) => TReturn {
+	return function actionWrapper(this: unknown, ...args: TArgs) {
+		return batch(() => untracked(() => fn.apply(this, args)));
+	};
+}
+
+//#endregion Action
+
+//#region createModel
+
+/** Models should only contain signals, actions, and nested objects containing only signals and actions. */
+type ValidateModel<TModel> = {
+	[Key in keyof TModel]: TModel[Key] extends ReadonlySignal<unknown>
+		? TModel[Key]
+		: TModel[Key] extends (...args: any[]) => any
+			? TModel[Key]
+			: TModel[Key] extends object
+				? ValidateModel<TModel[Key]>
+				: `Property ${Key extends string ? `'${Key}' ` : ""}is not a Signal, Action, or an object that contains only Signals and Actions.`;
+};
+
+export type Model<TModel> = ValidateModel<TModel> & DisposableLike;
+
+export type ModelFactory<TModel, TFactoryArgs extends any[] = []> = (
+	...args: TFactoryArgs
+) => ValidateModel<TModel>;
+export type ModelConstructor<TModel, TFactoryArgs extends any[] = []> = new (
+	...args: TFactoryArgs
+) => Model<TModel>;
+
+/**
+ * The public types for ModelConstructor require using `new` to help
+ * disambiguate the function passed into `createModel` and the returned
+ * constructor function. It is easier to say that `createModel` accepts
+ * a factory and returns a class, then to say it accepts a factory and
+ * returns a factory. In other words, this example:
+ *
+ * ```ts
+ * const PersonModel = createModel((name: string) => ({ ... }));
+ * const person = new PersonModel("John");
+ * ```
+ *
+ * is easier to understand than this example:
+ *
+ * ```ts
+ * const createPerson = createModel((name: string) => ({ ... }));
+ * const person = createPerson("John");
+ * ```
+ *
+ * However, internally we implement `createModel` to return a function
+ * that can be called without `new` for simplicity. To bridge the gap
+ * between the public types and the internal implementation, we define
+ * this internal interface that extends the public interface but also
+ * allows calling without `new`.
+ *
+ * This pattern is used by the Preact & React adapters to make instantiating
+ * a model or a function that returns a model easier.
+ *
+ * @internal
+ */
+interface InternalModelConstructor<
+	TModel,
+	TFactoryArgs extends any[],
+> extends ModelConstructor<TModel, TFactoryArgs> {
+	(...args: TFactoryArgs): Model<TModel>;
+}
+
+function startCapturingEffects(): () => Effect[] | undefined {
+	let prevCapturedEffects = capturedEffects;
+	// Always establish a fresh capture scope, even when `untracked()` has
+	// temporarily cleared the parent scope. This lets nested models own their
+	// effects without promoting them to a suppressed outer scope.
+	capturedEffects = [];
+
+	return function stopCapturingEffects() {
+		let modelEffects = capturedEffects;
+		if (capturedEffects && prevCapturedEffects) {
+			prevCapturedEffects = prevCapturedEffects.concat(capturedEffects);
+		}
+
+		capturedEffects = prevCapturedEffects;
+
+		return modelEffects;
+	};
+}
+
+const wrapInAction = (value: Record<string, unknown>) => {
+	for (const key in value) {
+		const val = value[key];
+		if (typeof val === "function") {
+			value[key] = action(val as (...args: unknown[]) => unknown);
+		} else if (typeof val === "object" && val !== null && !("brand" in val)) {
+			// Recursively wrap nested object properties in actions. This allows users to write
+			// nested models without worrying about wrapping their functions in `action`.
+			wrapInAction(val as Record<string, unknown>);
+		}
+	}
+};
+
+function createModel<TModel, TFactoryArgs extends any[] = []>(
+	modelFactory: ModelFactory<TModel, TFactoryArgs>
+): ModelConstructor<TModel, TFactoryArgs> {
+	return function SignalModel(...args: TFactoryArgs): Model<TModel> {
+		let modelEffects: Effect[] | undefined;
+		let model: Model<TModel>;
+
+		const stopCapturingEffects = startCapturingEffects();
+		try {
+			model = modelFactory(...args) as Model<TModel>;
+		} catch (err) {
+			// Drop any captured effects on error. Errors from nested models will bubble
+			// up here and recursively reset `capturedEffects` to `undefined` preventing
+			// any captured effects from leaking
+			capturedEffects = undefined;
+			throw err;
+		} finally {
+			modelEffects = stopCapturingEffects();
+		}
+
+		wrapInAction(model);
+
+		model[Symbol.dispose] = action(function disposeModel() {
+			if (modelEffects) {
+				for (let i = 0; i < modelEffects.length; i++) {
+					modelEffects[i].dispose();
+				}
+			}
+
+			modelEffects = undefined;
+		});
+
+		return model;
+	} as InternalModelConstructor<TModel, TFactoryArgs>;
+}
+
+//#endregion createModel
+
+export {
+	computed,
+	effect,
+	batch,
+	untracked,
+	action,
+	createModel,
+	Signal,
+	ReadonlySignal,
+	Effect,
+	Computed,
+};

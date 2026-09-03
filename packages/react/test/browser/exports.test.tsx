@@ -1,5 +1,6 @@
 import * as core from "@preact/signals-core";
 import * as adapter from "@preact/signals-react";
+import { describe, it, expect } from "vitest";
 
 describe("@preact/signals-react", () => {
 	describe("exports", () => {
@@ -8,6 +9,8 @@ describe("@preact/signals-react", () => {
 
 			for (let i = 0; i < keys.length; i++) {
 				const key = keys[i];
+				if (key === "Effect" || key === "setDebugHook" || key === "Computed")
+					continue;
 				expect(key in adapter).to.equal(
 					true,
 					`"${key}" is not exported from react adapter`

@@ -1,0 +1,492 @@
+/* eslint-disable no-console */
+import { Signal, Effect, Computed, effect } from "@preact/signals-core";
+import { formatValue, getSignalId, getSignalName } from "./utils";
+import { UpdateInfo, Node, Computed as ComputedType } from "./internal";
+import { getExtensionBridge } from "./extension-bridge";
+import "./devtools"; // Initialize DevTools integration
+
+// Initialize the ExtensionBridge immediately so it can receive CONFIGURE_DEBUG messages
+// from embedded devtools-ui even before any signals are created
+getExtensionBridge();
+
+const inflightUpdates = new Set<Signal | Effect>();
+const updateInfoMap = new WeakMap<Signal | Effect, UpdateInfo[]>();
+const trackers = new WeakMap<Signal | Effect, number>();
+const signalValues = new WeakMap<Signal | Effect, any>();
+const subscriptions = new WeakMap<Signal | Effect, () => void>();
+const internalEffects = new WeakSet<Effect>();
+const signalDependencies = new WeakMap<Signal | Effect, Set<string>>(); // Track what each signal depends on
+const instrumentedComputeds = new WeakSet<Computed>();
+const computedWasEvaluated = new WeakMap<Computed, boolean>();
+
+export function setDebugOptions(options: {
+	grouped?: boolean;
+	enabled?: boolean;
+	consoleLogging?: boolean;
+	spacing?: number;
+}) {
+	if (typeof options.grouped === "boolean") isGrouped = options.grouped;
+	if (typeof options.enabled === "boolean") debugEnabled = options.enabled;
+	if (typeof options.consoleLogging === "boolean")
+		consoleLoggingEnabled = options.consoleLogging;
+	if (typeof options.spacing === "number") spacing = options.spacing;
+}
+
+let isGrouped = true,
+	debugEnabled = true,
+	consoleLoggingEnabled = true,
+	initializing = false,
+	spacing = 0;
+
+function trackDependency(target: Signal | Effect, source: Signal | Effect) {
+	const sourceId = getSignalId(source);
+
+	if (!signalDependencies.has(target)) {
+		signalDependencies.set(target, new Set());
+	}
+	signalDependencies.get(target)?.add(sourceId);
+}
+
+// Store original methods
+const originalSubscribe = Signal.prototype._subscribe;
+const originalUnsubscribe = Signal.prototype._unsubscribe;
+// Track subscriptions for statistics
+Signal.prototype._subscribe = function (node: Node) {
+	if (initializing) return originalSubscribe.call(this, node);
+
+	const tracker = trackers.get(this) || 0;
+	trackers.set(this, tracker + 1);
+
+	if (tracker === 0 && !("_fn" in this)) {
+		// Initialize tracked value and set up subscription for logging
+		const initialValue = this.peek();
+		signalValues.set(this, initialValue);
+		const sig = this as Signal;
+
+		// Set up a subscription to track value changes
+		initializing = true;
+		let internalEffect: Effect | undefined;
+		const unsubscribe = effect(function (this: Effect) {
+			// Capture the effect reference on first run and add to internalEffects
+			// to prevent it from being treated as a user effect
+			if (!internalEffect) {
+				internalEffect = this;
+				internalEffects.add(this);
+			}
+			const newValue = sig.value;
+			const prevValue = signalValues.get(sig);
+
+			if (!debugEnabled) return;
+
+			if (prevValue !== newValue) {
+				signalValues.set(sig, newValue);
+				inflightUpdates.add(sig);
+				updateInfoMap.set(sig, [
+					{
+						signal: sig,
+						prevValue,
+						newValue,
+						timestamp: Date.now(),
+						depth: 0,
+						type: "value",
+					},
+				]);
+				scheduleFlush();
+			}
+		});
+		initializing = false;
+
+		subscriptions.set(sig, () => {
+			unsubscribe();
+			internalEffect && internalEffects.delete(internalEffect);
+		});
+	}
+
+	return originalSubscribe.call(this, node);
+};
+
+type DebugComputed = Computed & { _fn: () => unknown };
+
+function instrumentComputed(computed: DebugComputed) {
+	if (instrumentedComputeds.has(computed)) return;
+
+	const originalFn = computed._fn;
+	computed._fn = function () {
+		computedWasEvaluated.set(computed, true);
+		return originalFn.call(this);
+	};
+	instrumentedComputeds.add(computed);
+}
+
+const originalRefresh = Computed.prototype._refresh;
+Computed.prototype._refresh = function () {
+	const computed = this as DebugComputed;
+	instrumentComputed(computed);
+	computedWasEvaluated.set(computed, false);
+
+	const prevValue = this._value;
+	const result = originalRefresh.call(this);
+	const newValue = this._value;
+	const baseSignal = bubbleUpToBaseSignal(this as any);
+	if (baseSignal && computedWasEvaluated.get(computed)) {
+		// Track dependency
+		trackDependency(this, baseSignal.signal);
+
+		const updateInfoList = updateInfoMap.get(baseSignal.signal) || [];
+		updateInfoList.push({
+			signal: this,
+			prevValue,
+			newValue,
+			timestamp: Date.now(),
+			depth: baseSignal.depth,
+			type: "value",
+			subscribedTo: getSignalId(baseSignal.signal),
+			allDependencies: getAllCurrentDependencies(this as any),
+			recomputed: true,
+			outputChanged: prevValue !== newValue,
+		});
+		updateInfoMap.set(baseSignal.signal, updateInfoList);
+	}
+
+	return result;
+};
+
+const originalComputedUnsubscribe = Computed.prototype._unsubscribe;
+Computed.prototype._unsubscribe = function (node: Node) {
+	const result = originalComputedUnsubscribe.call(this, node);
+
+	// When a computed signal loses all subscribers, it unsubscribes from its sources
+	// Check if this computed is now completely disconnected (no targets)
+	if (this._targets === undefined) {
+		// Notify devtools that this computed is disposed (no more subscribers)
+		if (
+			debugEnabled &&
+			typeof window !== "undefined" &&
+			(window as any).__PREACT_SIGNALS_DEVTOOLS__
+		) {
+			(window as any).__PREACT_SIGNALS_DEVTOOLS__.sendDisposal?.(
+				this,
+				"computed"
+			);
+		}
+	}
+
+	return result;
+};
+
+Signal.prototype._unsubscribe = function (node: Node) {
+	const tracker = trackers.get(this) || 0;
+	if (tracker > 0) {
+		trackers.set(this, tracker - 1);
+
+		if (tracker === 1) {
+			signalValues.delete(this);
+			trackers.delete(this);
+
+			// Clean up our debug subscription
+			const unsubscribe = subscriptions.get(this);
+			if (unsubscribe) {
+				unsubscribe();
+				subscriptions.delete(this);
+			}
+
+			// Notify devtools that this signal is disposed (no more subscribers)
+			// Only for plain signals - computed signals have their own disposal handler
+			if (
+				!("_fn" in this) &&
+				typeof window !== "undefined" &&
+				(window as any).__PREACT_SIGNALS_DEVTOOLS__
+			) {
+				(window as any).__PREACT_SIGNALS_DEVTOOLS__.sendDisposal?.(
+					this,
+					"signal"
+				);
+			}
+		}
+	}
+
+	return originalUnsubscribe.call(this, node);
+};
+
+function hasUpdateEntry(signal: Signal) {
+	const inFlightUpdate = updateInfoMap.get(signal);
+	if (
+		inFlightUpdate &&
+		!inFlightUpdate.find(updateInfo => updateInfo.signal === signal)
+	) {
+		return true;
+	}
+	return false;
+}
+
+export interface DependencyInfo {
+	id: string;
+	name: string;
+	type: "signal" | "computed";
+}
+
+/**
+ * Get all current dependencies for a computed or effect by walking the _sources linked list.
+ * This provides the complete picture of what signals a computed/effect depends on,
+ * not just the one that triggered an update.
+ *
+ * Returns rich dependency info (id, name, type) so the devtools can render
+ * dependency nodes even if they haven't had their own updates.
+ */
+function getAllCurrentDependencies(
+	node: ComputedType | Effect
+): DependencyInfo[] | undefined {
+	if (!("_sources" in node)) {
+		return undefined;
+	}
+
+	const dependencies = new Map<string, DependencyInfo>();
+	let sourceNode = (node as ComputedType)._sources;
+
+	while (sourceNode) {
+		const source = sourceNode._source as Signal;
+		const id = getSignalId(source);
+		if (!dependencies.has(id)) {
+			dependencies.set(id, {
+				id,
+				name: getSignalName(source, "value"),
+				type: "_fn" in source ? "computed" : "signal",
+			});
+		}
+		sourceNode = sourceNode._nextSource;
+	}
+
+	return dependencies.size > 0 ? Array.from(dependencies.values()) : undefined;
+}
+
+function bubbleUpToBaseSignal(
+	node: ComputedType,
+	depth = 1
+): { signal: Signal; depth: number } | null {
+	if (!("_sources" in node)) {
+		return null;
+	}
+
+	// Get the head of the sources linked list
+	let sourceNode = node._sources;
+
+	// Iterate through all sources in the linked list
+	while (sourceNode) {
+		const source = sourceNode._source as Signal;
+		if (inflightUpdates.has(source) && !hasUpdateEntry(source)) {
+			return { signal: source, depth };
+		}
+		sourceNode = sourceNode._nextSource;
+	}
+
+	// If no direct source found, recurse into all sources to find the inflight update
+	sourceNode = node._sources;
+	while (sourceNode) {
+		const result = bubbleUpToBaseSignal(sourceNode._source as any, depth + 1);
+		if (result) {
+			return result;
+		}
+		sourceNode = sourceNode._nextSource;
+	}
+
+	return null;
+}
+
+Effect.prototype._debugCallback = function (this: Effect) {
+	if (!debugEnabled || internalEffects.has(this)) return;
+
+	if ("_sources" in this) {
+		const baseSignal = bubbleUpToBaseSignal(this as any);
+		if (baseSignal) {
+			// Track dependency
+			trackDependency(this, baseSignal.signal);
+
+			const updateInfoList = updateInfoMap.get(baseSignal.signal) || [];
+			updateInfoList.push({
+				signal: this,
+				timestamp: Date.now(),
+				depth: baseSignal.depth,
+				type: "component",
+				subscribedTo: getSignalId(baseSignal.signal),
+				allDependencies: getAllCurrentDependencies(this as any),
+			});
+			updateInfoMap.set(baseSignal.signal, updateInfoList);
+		}
+	}
+};
+
+const originalEffectCallback = Effect.prototype._callback;
+Effect.prototype._callback = function (this: Effect) {
+	if (!debugEnabled || internalEffects.has(this))
+		return originalEffectCallback.call(this);
+
+	if ("_sources" in this) {
+		const baseSignal = bubbleUpToBaseSignal(this as any);
+		if (baseSignal) {
+			// Track dependency
+			trackDependency(this, baseSignal.signal);
+
+			const updateInfoList = updateInfoMap.get(baseSignal.signal) || [];
+			updateInfoList.push({
+				signal: this,
+				timestamp: Date.now(),
+				depth: baseSignal.depth,
+				type: "effect",
+				subscribedTo: getSignalId(baseSignal.signal),
+				allDependencies: getAllCurrentDependencies(this as any),
+			});
+			updateInfoMap.set(baseSignal.signal, updateInfoList);
+		}
+	}
+
+	return originalEffectCallback.call(this);
+};
+
+// Patch Effect.prototype._dispose to emit disposal events
+const originalEffectDispose = Effect.prototype._dispose;
+Effect.prototype._dispose = function (this: Effect) {
+	// Notify devtools that this effect is being disposed
+	if (
+		debugEnabled &&
+		!internalEffects.has(this) &&
+		typeof window !== "undefined" &&
+		(window as any).__PREACT_SIGNALS_DEVTOOLS__
+	) {
+		(window as any).__PREACT_SIGNALS_DEVTOOLS__.sendDisposal?.(this, "effect");
+	}
+
+	return originalEffectDispose.call(this);
+};
+
+let scheduled = false;
+function scheduleFlush() {
+	if (!scheduled) {
+		scheduled = true;
+		queueMicrotask(() => {
+			flushUpdates();
+			scheduled = false;
+		});
+	}
+}
+
+function flushUpdates() {
+	const signals = Array.from(inflightUpdates);
+	inflightUpdates.clear();
+	const bridge = getExtensionBridge();
+
+	for (const signal of signals) {
+		const updateInfoList = updateInfoMap.get(signal) || [];
+
+		// Send updates to Chrome DevTools extension with filtering and throttling
+		if (typeof window !== "undefined" && !bridge.shouldThrottleUpdate()) {
+			// Filter updates based on signal names
+			const filteredUpdates = updateInfoList.filter(updateInfo => {
+				const signalName = getSignalName(updateInfo.signal, updateInfo.type);
+				return bridge.matchesFilter(signalName);
+			});
+
+			if (
+				filteredUpdates.length > 0 &&
+				(window as any).__PREACT_SIGNALS_DEVTOOLS__
+			) {
+				(window as any).__PREACT_SIGNALS_DEVTOOLS__.sendUpdate?.(
+					filteredUpdates
+				);
+			}
+		}
+
+		let prevDepth = -1;
+		let openGroups = 0;
+		let prevOpenedGroup = false;
+		for (const updateInfo of updateInfoList) {
+			const openedGroup = logUpdate(updateInfo, prevDepth, prevOpenedGroup);
+			if (openedGroup) {
+				openGroups++;
+			}
+			prevDepth = updateInfo.depth;
+			prevOpenedGroup = openedGroup;
+		}
+		updateInfoMap.delete(signal);
+		new Array(openGroups).fill(0).map(endUpdateGroup);
+	}
+}
+
+/* eslint-disable no-console */
+function logUpdate(
+	info: UpdateInfo,
+	prevDepth: number,
+	prevOpenedGroup: boolean
+): boolean {
+	if (!debugEnabled || !consoleLoggingEnabled) return false;
+
+	// Performance Insights needs to observe no-output-change evaluations, but
+	// preserve the existing console surface by only logging visible output changes.
+	if (info.type === "value" && info.recomputed && !info.outputChanged) {
+		return false;
+	}
+
+	const { signal, type, depth } = info;
+	const name = getSignalName(signal, type);
+
+	// Effects can't have descendants, so we use a normal log instead of a group
+	if (type === "effect" || type === "component") {
+		const copy = type === "effect" ? "effect" : "component render";
+		// Only close the previous group if the previous item opened one and we're at the same depth
+		if (isGrouped && prevDepth === depth && prevOpenedGroup) {
+			endUpdateGroup();
+		}
+
+		console.log(`${" ".repeat(depth * 2)}↪️ Triggered ${copy}: ${name}`);
+		// Return false to indicate we didn't open a group
+		return false;
+	}
+
+	const formattedPrev = formatValue(info.prevValue);
+	const formattedNew = formatValue(info.newValue);
+
+	if (isGrouped) {
+		// Only close the previous group if the previous item opened one and we're at the same depth
+		if (prevDepth === depth && prevOpenedGroup) {
+			endUpdateGroup();
+		}
+
+		if (depth === 0) {
+			console.group(`🎯 Signal Update: ${name}`);
+		} else {
+			console.groupCollapsed(
+				`${" ".repeat(depth * 2)}↪️ Triggered update: ${name}`
+			);
+		}
+
+		console.log(`${" ".repeat(depth * spacing)}From:`, formattedPrev);
+		console.log(`${" ".repeat(depth * spacing)}To:`, formattedNew);
+
+		if ("_fn" in signal) {
+			console.log(`${" ".repeat(depth * spacing)}Type: Computed`);
+		}
+		// Return true to indicate we opened a group
+		return true;
+	} else {
+		console.log(
+			`${depth === 0 ? "🎯" : "↪️"} ${name}: ${formattedPrev} → ${formattedNew}`
+		);
+		return false;
+	}
+}
+
+function endUpdateGroup() {
+	if (debugEnabled && consoleLoggingEnabled && isGrouped) {
+		console.groupEnd();
+	}
+}
+/* eslint-enable no-console */
+
+// Export extension utilities
+export interface ExtensionConfig {
+	enabled?: boolean;
+	grouped?: boolean;
+	spacing?: number;
+	consoleLogging?: boolean;
+	maxUpdatesPerSecond?: number;
+	filterPatterns?: string[];
+}
