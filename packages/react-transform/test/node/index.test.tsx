@@ -1,6 +1,7 @@
 import { transform, traverse } from "@babel/core";
 import type { Visitor } from "@babel/core";
 import type { Scope } from "@babel/traverse";
+import debug from "debug";
 import prettier from "prettier";
 import signalsTransform, { PluginOptions } from "../../src/index";
 import {
@@ -19,7 +20,7 @@ import {
 	objMethodComp,
 	variableHooks,
 } from "./helpers";
-import { it, describe, expect } from "vitest";
+import { it, describe, expect, vi, afterAll } from "vitest";
 
 // Guidance for Debugging Generated Tests
 // ===============================
@@ -1420,5 +1421,47 @@ describe("React Signals Babel Transform", () => {
 				detectTransformedJSX: true,
 			});
 		});
+	});
+});
+
+describe("debug logging", () => {
+	// The plugin's logger is driven by the `debug` package, which reads DEBUG
+	// from the real environment while the statically imported plugin module
+	// is evaluated, so the namespace has to be enabled before imports run.
+	// Note that `process` is statically replaced in test code (see
+	// vitest.config.mjs), so the real environment is reached via `globalThis`.
+	vi.hoisted(() => {
+		(globalThis as any).process.env.DEBUG =
+			"signals:react-transform:transformed";
+	});
+
+	// With the namespace enabled, every component this file transforms would
+	// log to stderr, so route debug output into a buffer before any test runs.
+	const logged: string[] = [];
+	const originalLog = debug.log;
+	debug.log = (...args: unknown[]) => {
+		logged.push(String(args[0]));
+	};
+
+	afterAll(() => {
+		debug.log = originalLog;
+		debug.disable();
+		delete (globalThis as any).process.env.DEBUG;
+	});
+
+	it("logs transformed components with their file location", () => {
+		logged.length = 0;
+
+		const output = transformCode(
+			"function Component() { return <div>{s.value}</div>; }",
+			{ mode: "auto" },
+			"Component.js"
+		);
+
+		expect(output).toContain("useSignals");
+		expect(logged).toHaveLength(1);
+		// The cwd is unavailable under the fake `process` above, so the full
+		// filename is kept in the logged location.
+		expect(logged[0]).toContain("Component (Component.js:1)");
 	});
 });
