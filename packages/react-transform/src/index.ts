@@ -911,7 +911,7 @@ function log(
 	if (!logger.transformed.enabled && !logger.skipped.enabled) return;
 
 	let cwd = "";
-	if (typeof process !== undefined && typeof process.cwd == "function") {
+	if (typeof process !== "undefined" && typeof process.cwd == "function") {
 		cwd = process.cwd().replace(/\\([^ ])/g, "/$1");
 		cwd = cwd.endsWith("/") ? cwd : cwd + "/";
 	}
