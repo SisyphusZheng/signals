@@ -1,6 +1,7 @@
 import { transform, traverse } from "@babel/core";
 import type { Visitor } from "@babel/core";
 import type { Scope } from "@babel/traverse";
+import debug from "debug";
 import prettier from "prettier";
 import signalsTransform, { PluginOptions } from "../../src/index";
 import {
@@ -19,7 +20,7 @@ import {
 	objMethodComp,
 	variableHooks,
 } from "./helpers";
-import { it, describe, expect } from "vitest";
+import { it, describe, expect, vi, afterAll } from "vitest";
 
 // Guidance for Debugging Generated Tests
 // ===============================
@@ -1420,5 +1421,38 @@ describe("React Signals Babel Transform", () => {
 				detectTransformedJSX: true,
 			});
 		});
+	});
+});
+
+describe("debug logging", () => {
+	vi.hoisted(() => {
+		(globalThis as any).process.env.DEBUG =
+			"signals:react-transform:transformed";
+	});
+
+	const logged: string[] = [];
+	const originalLog = debug.log;
+	debug.log = (...args: unknown[]) => {
+		logged.push(String(args[0]));
+	};
+
+	afterAll(() => {
+		debug.log = originalLog;
+		debug.disable();
+		delete (globalThis as any).process.env.DEBUG;
+	});
+
+	it("logs transformed components with their file location", () => {
+		logged.length = 0;
+
+		const output = transformCode(
+			"function Component() { return <div>{s.value}</div>; }",
+			{ mode: "auto" },
+			"Component.js"
+		);
+
+		expect(output).toContain("useSignals");
+		expect(logged).toHaveLength(1);
+		expect(logged[0]).toContain("Component (Component.js:1)");
 	});
 });
