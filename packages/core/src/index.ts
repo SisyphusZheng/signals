@@ -1074,34 +1074,28 @@ function startCapturingEffects(): () => Effect[] | undefined {
 }
 
 const wrapInAction = (value: Record<string, unknown>) => {
-	for (const key in value) {
-		const desc = Object.getOwnPropertyDescriptor(value, key);
-		if (!desc || desc.get !== undefined || desc.set !== undefined) continue;
-		const val = desc.value;
-		if (typeof val === "function") {
-			value[key] = action(val as (...args: unknown[]) => unknown);
-		} else if (typeof val === "object" && val !== null && !("brand" in val)) {
-			// Recursively wrap nested object properties in actions. This allows users to write
-			// nested models without worrying about wrapping their functions in `action`.
-			wrapInAction(val as Record<string, unknown>);
-		}
-	}
-
-	if (
-		typeof value !== "function" &&
-		Object.prototype.toString.call(value) === "[object Object]"
+	for (
+		let obj = value;
+		obj && obj !== Object.prototype;
+		obj =
+			Object.prototype.toString.call(value) === "[object Object]" &&
+			Object.getPrototypeOf(obj)
 	) {
-		let proto = Object.getPrototypeOf(value);
-		while (proto && proto !== Object.prototype) {
-			for (const key of Object.getOwnPropertyNames(proto)) {
-				if (key === "constructor") continue;
-				if (Object.prototype.hasOwnProperty.call(value, key)) continue;
-				const desc = Object.getOwnPropertyDescriptor(proto, key);
-				if (desc && typeof desc.value === "function") {
-					value[key] = action(desc.value as (...args: unknown[]) => unknown);
+		const descs = Object.getOwnPropertyDescriptors(obj);
+		for (const key in descs) {
+			const val = descs[key].value;
+			if (typeof val === "function") {
+				if (key !== "constructor" && value[key] === val) {
+					value[key] = action(val as (...args: unknown[]) => unknown);
 				}
+			} else if (
+				obj === value &&
+				typeof val === "object" &&
+				val !== null &&
+				!("brand" in val)
+			) {
+				wrapInAction(val as Record<string, unknown>);
 			}
-			proto = Object.getPrototypeOf(proto);
 		}
 	}
 };
