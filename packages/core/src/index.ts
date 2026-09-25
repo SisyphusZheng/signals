@@ -1076,8 +1076,6 @@ function startCapturingEffects(): () => Effect[] | undefined {
 const wrapInAction = (value: Record<string, unknown>) => {
 	for (const key in value) {
 		const desc = Object.getOwnPropertyDescriptor(value, key);
-		// Accessor properties are skipped: reading them would invoke the getter,
-		// and assigning a wrapped copy back throws on getter-only properties.
 		if (!desc || desc.get !== undefined || desc.set !== undefined) continue;
 		const val = desc.value;
 		if (typeof val === "function") {
