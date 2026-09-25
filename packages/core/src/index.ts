@@ -1075,13 +1075,40 @@ function startCapturingEffects(): () => Effect[] | undefined {
 
 const wrapInAction = (value: Record<string, unknown>) => {
 	for (const key in value) {
-		const val = value[key];
+		const desc = Object.getOwnPropertyDescriptor(value, key);
+		// Accessor properties are skipped: reading them would invoke the getter,
+		// and assigning a wrapped copy back throws on getter-only properties.
+		if (!desc || desc.get !== undefined || desc.set !== undefined) continue;
+		const val = desc.value;
 		if (typeof val === "function") {
 			value[key] = action(val as (...args: unknown[]) => unknown);
 		} else if (typeof val === "object" && val !== null && !("brand" in val)) {
 			// Recursively wrap nested object properties in actions. This allows users to write
 			// nested models without worrying about wrapping their functions in `action`.
 			wrapInAction(val as Record<string, unknown>);
+		}
+	}
+
+	// Class instance models keep their methods on the prototype where they are
+	// invisible to for...in (class methods are non-enumerable). Wrap inherited
+	// methods as own properties so they get the same action semantics as object
+	// literal methods. Built-ins (Map, Date, arrays, ...) are excluded so their
+	// inherited methods are left untouched.
+	if (
+		typeof value !== "function" &&
+		Object.prototype.toString.call(value) === "[object Object]"
+	) {
+		let proto = Object.getPrototypeOf(value);
+		while (proto && proto !== Object.prototype) {
+			for (const key of Object.getOwnPropertyNames(proto)) {
+				if (key === "constructor") continue;
+				if (Object.prototype.hasOwnProperty.call(value, key)) continue;
+				const desc = Object.getOwnPropertyDescriptor(proto, key);
+				if (desc && typeof desc.value === "function") {
+					value[key] = action(desc.value as (...args: unknown[]) => unknown);
+				}
+			}
+			proto = Object.getPrototypeOf(proto);
 		}
 	}
 };
