@@ -1087,11 +1087,6 @@ const wrapInAction = (value: Record<string, unknown>) => {
 		}
 	}
 
-	// Class instance models keep their methods on the prototype where they are
-	// invisible to for...in (class methods are non-enumerable). Wrap inherited
-	// methods as own properties so they get the same action semantics as object
-	// literal methods. Built-ins (Map, Date, arrays, ...) are excluded so their
-	// inherited methods are left untouched.
 	if (
 		typeof value !== "function" &&
 		Object.prototype.toString.call(value) === "[object Object]"
